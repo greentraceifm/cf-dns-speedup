@@ -6,6 +6,17 @@ REPO_RAW_BASE="${REPO_RAW_BASE:-https://raw.githubusercontent.com/greentraceifm/
 
 mkdir -p "$APP_DIR"
 
+if ! command -v bash >/dev/null 2>&1; then
+  if command -v opkg >/dev/null 2>&1; then
+    echo "Installing bash dependency..."
+    opkg update
+    opkg install bash
+  else
+    echo "bash is required but was not found. Please install bash first." >&2
+    exit 1
+  fi
+fi
+
 if [ -n "$REPO_RAW_BASE" ]; then
   curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/cf-dns-speedup.sh" "$REPO_RAW_BASE/cf-dns-speedup.sh"
   curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/config.example.env" "$REPO_RAW_BASE/config.example.env"

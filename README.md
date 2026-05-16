@@ -40,36 +40,37 @@ curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/dc4838
 
 ## 中文菜单
 
-主菜单：
+主菜单已经尽量保持原项目风格：
 
 ```text
-1. 安装/首次配置
-2. 变更参数配置
-3. 立即执行优选并更新 DNS
-4. 域名清理（安全版暂不自动批量删除 DNS）
-5. 卸载脚本
-6. 查看当前配置
-7. 查看运行日志
+1.安装/重置脚本
+2.更改各项参数配置
+3.运行一次已配置完成的脚本
+4.删除CF域名指定名称解析记录
+5.卸载
+6.查看运行日志
 0. 退出
 ```
 
 变更参数配置菜单：
 
 ```text
-1. 切换推送模式（安全版固定为域名解析推送）
-2. 切换 CDN IP 来源（安全版固定为官方 IP 列表）
-3. 切换域名解析方案（安全版固定为单记录更新）
-4. 切换优选 IPv4 / IPv6
+1. 切换推送模式（域名解析推送 / IP 直接推送）
+2. 切换 CDN IP 来源（官方 IP / 反代 IP）
+3. 切换域名解析方案（多 IP 到一域名 / 每 IP 到每域名）
+4. 切换优选 IPv4 或 IPv6
 5. 更换端口
 6. 开启、关闭测速，更换测速网站
-7. 更换代理插件（安全版不自动控制代理插件）
-8. 更改 cfst 总超时时间、线程、结果数量
+7. 更换 OpenWrt 代理插件
+8. 更改测速线程、显示数量、总超时、代理重启等待时间
 9. 更换 Cloudflare 解析域名
 10. 更换 Cloudflare API Token / Zone ID
-11. 通知配置（暂未实现，避免保存第三方 token）
-12. 切换 DRY_RUN 安全测试模式
-13. 查看当前配置
-14. 返回主菜单
+11. 关闭、开启 Telegram 通知，更换 Token、用户 ID
+12. 切换 Telegram API 接口域名
+13. 关闭、开启 PushPlus 微信通知，更换 Token
+14. 切换 DRY_RUN 安全测试模式
+15. 查看当前配置
+0. 返回主菜单
 ```
 
 ## 首次使用流程
@@ -80,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/dc4838
 4. 首次保持 `DRY_RUN=1`。
 5. 选择 `3. 立即执行优选并更新 DNS`。
 6. 查看日志，确认出现 `dry-run: would update ...`。
-7. 回到菜单，选择 `12. 切换 DRY_RUN 安全测试模式`，切换为 `DRY_RUN=0`。
+7. 回到菜单，选择 `14. 切换 DRY_RUN 安全测试模式`，切换为 `DRY_RUN=0`。
 8. 再次执行，才会真实更新 Cloudflare DNS。
 
 ## Cloudflare Token 权限
@@ -131,30 +132,39 @@ https://github.com/greentraceifm/cf-dns-speedup
 cat /root/cf-dns-speedup/run.log
 ```
 
-## 与原项目功能差异
+## 与原项目功能对齐
 
-当前版本不是完全等价复刻，而是“保留主流程 + 修正高风险点”的安全版。
+当前版本目标是保留原项目的功能和菜单，同时修正关键风险。
 
 保留：
 
 - 中文菜单。
 - 安装/变更配置/立即执行/查看日志。
 - Cloudflare 官方 IP 优选。
+- CDN 反代 IP 库优选。
+- 反代 IP 国家/地区识别。
 - IPv4 / IPv6 选择。
 - 端口选择。
 - 下载测速地址配置。
 - `cfst` 实时测速输出。
+- 域名解析推送 / IP 直接输出。
+- 多个优选 IP 解析到一个域名。
+- 每个优选 IP 解析到每个域名。
 - 更新 Cloudflare DNS 记录。
+- 删除指定域名的 Cloudflare A/AAAA 记录。
+- Passwall、Passwall2、SSR-Plus、Clash、OpenClash、Bypass、V2raya、Hello-World、Homeproxy、MihomoTProxy、ShellCrash 代理插件停启。
+- Telegram 通知。
+- PushPlus 通知。
 
-暂不保留或改为手动：
+安全修正：
 
-- 不自动停止或重启 PassWall、OpenClash 等代理插件。
-- 不自动批量删除 Cloudflare DNS 记录。
-- 不保存 Telegram、PushPlus 等第三方通知 token。
 - 不使用 Cloudflare Global API Key。
 - 不使用混淆安装器。
+- 真实更新和删除 DNS 前可用 `DRY_RUN=1` 预演。
+- `cfst` 有总超时，避免卡死。
+- 代理插件停启有超时和日志提示。
 
-如果你确认某个旧功能确实需要，我会逐项加回，但会加超时、确认提示和回滚保护。
+仍然建议首次保持 `DRY_RUN=1`，确认日志无误后再切换为 `DRY_RUN=0`。
 
 如果测速仍然慢或容易失败，建议在菜单里把参数调保守：
 

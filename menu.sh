@@ -50,7 +50,25 @@ mask_token() {
   [ -n "$token" ] || { echo ""; return; }
   case "$token" in
     put_your*) echo "$token" ;;
+    "") echo "" ;;
     *) echo "********" ;;
+  esac
+}
+
+plugin_name() {
+  case "$1" in
+    1) echo Passwall ;;
+    2) echo Passwall2 ;;
+    3) echo SSR-Plus ;;
+    4) echo Clash ;;
+    5) echo OpenClash ;;
+    6) echo Bypass ;;
+    7) echo V2raya ;;
+    8) echo Hello-World ;;
+    9) echo Homeproxy ;;
+    10) echo MihomoTProxy ;;
+    11) echo ShellCrash ;;
+    *) echo "不使用任何插件" ;;
   esac
 }
 
@@ -58,38 +76,51 @@ print_status() {
   ensure_config
   echo
   echo "当前配置："
-  echo "1、当前为域名解析推送模式（需要域名，推荐）"
-  echo "2、当前为 Cloudflare CDN 官方 IP 模式"
-  echo "3、当前为单域名记录更新方案"
+  [ "$(get_value PUSH_MODE)" = "domain" ] && echo "1、当前为域名解析推送模式（需要域名，推荐）" || echo "1、当前为 IP 直接推送模式（无需域名）"
+  [ "$(get_value CDN_IP_MODE)" = "reverse" ] && echo "2、当前为 CDN 反代 IP 模式" || echo "2、当前为 Cloudflare CDN 官方 IP 模式"
+  if [ "$(get_value DOMAIN_UPDATE_MODE)" = "one_to_one" ]; then
+    echo "3、当前为每个优选 IP 解析到每个域名方案"
+  else
+    echo "3、当前为多个优选 IP 解析到一个域名方案"
+  fi
   echo "4、当前为优选 $(get_value IP_VERSION)"
   echo "5、使用的端口：$(get_value CFST_PORT)"
   if [ -n "$(get_value CFST_URL)" ]; then
     echo "6、测速已开启，测速地址：$(get_value CFST_URL)"
   else
-    echo "6、当前为延迟优选模式，未开启下载测速"
+    echo "6、当前已关闭下载测速，只做延迟优选"
   fi
-  echo "7、代理插件控制：关闭（安全版不自动停止或重启代理插件）"
-  echo "8、cfst 总超时：$(get_value CFST_TOTAL_TIMEOUT) 秒"
-  echo "9、更新域名：$(get_value CF_RECORD_NAME)"
+  echo "7、代理插件：$(plugin_name "$(get_value PROXY_PLUGIN)")"
+  echo "8、重启代理插件后等待：$(get_value PROXY_RESTART_WAIT) 秒；cfst 总超时：$(get_value CFST_TOTAL_TIMEOUT) 秒"
+  echo "9、multi 域名：$(get_value CF_RECORD_NAME)"
+  echo "9、one_to_one 域名列表：$(get_value CF_RECORD_NAMES)"
   echo "10、Cloudflare Zone ID：$(get_value CF_ZONE_ID)"
-  echo "11、Cloudflare API Token：$(mask_token "$(get_value CF_API_TOKEN)")"
-  echo "12、DRY_RUN：$(get_value DRY_RUN)"
-  echo "13、测速线程/数量：$(get_value CFST_THREADS)/$(get_value CFST_COUNT)"
+  echo "10、Cloudflare API Token：$(mask_token "$(get_value CF_API_TOKEN)")"
+  if [ -n "$(get_value TELEGRAM_BOT_TOKEN)" ]; then
+    echo "11、Telegram：已配置"
+  else
+    echo "11、Telegram：未配置"
+  fi
+  echo "12、Telegram API：$(get_value TELEGRAM_API)"
+  if [ -n "$(get_value PUSHPLUS_TOKEN)" ]; then
+    echo "13、PushPlus：已配置"
+  else
+    echo "13、PushPlus：未配置"
+  fi
+  echo "DRY_RUN：$(get_value DRY_RUN)"
+  echo "测速线程/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_COUNT)"
 }
 
 configure_cloudflare() {
   ensure_config
   echo
   echo "配置 Cloudflare 信息"
-  printf "请输入 Cloudflare API Token（建议 Zone:Read + DNS:Edit 最小权限）: "
+  printf "请输入 Cloudflare API Token（建议 Zone:Read + DNS:Edit 最小权限，回车保持不变）: "
   read -r token
   [ -n "$token" ] && set_value CF_API_TOKEN "$token"
-  printf "请输入 Cloudflare 区域 ID Zone ID: "
+  printf "请输入 Cloudflare 区域 ID Zone ID（回车保持不变）: "
   read -r zone
   [ -n "$zone" ] && set_value CF_ZONE_ID "$zone"
-  printf "请输入完整解析域名，例如 best.example.com: "
-  read -r record
-  [ -n "$record" ] && set_value CF_RECORD_NAME "$record"
   printf "是否开启 Cloudflare 小云朵代理 true/false（默认 false）: "
   read -r proxied
   [ -n "$proxied" ] || proxied=false
@@ -102,7 +133,7 @@ configure_speed_url() {
   echo
   echo "是否测速？"
   echo "1. 开启下载测速"
-  echo "2. 关闭下载测速，只做延迟优选（推荐更稳）"
+  echo "2. 关闭下载测速，只做延迟优选"
   printf "请选择（回车默认 2）: "
   read -r choice
   if [ "$choice" = "1" ]; then
@@ -150,7 +181,7 @@ configure_threads() {
   read -r threads
   [ -n "$threads" ] || threads=32
   set_raw CFST_THREADS "$threads"
-  printf "请输入显示/更新的 IP 数量（默认 5）: "
+  printf "请输入测试并显示的 IP 数量（默认 5）: "
   read -r count
   [ -n "$count" ] || count=5
   set_raw CFST_COUNT "$count"
@@ -161,12 +192,128 @@ configure_threads() {
   echo "测速参数已保存。"
 }
 
+toggle_push_mode() {
+  current="$(get_value PUSH_MODE)"
+  if [ "$current" = "domain" ]; then
+    set_value PUSH_MODE "ip"
+    echo "已切换为 IP 直接推送模式（不更新 Cloudflare DNS）"
+  else
+    set_value PUSH_MODE "domain"
+    echo "已切换为域名解析推送模式"
+  fi
+}
+
+toggle_cdn_source() {
+  current="$(get_value CDN_IP_MODE)"
+  if [ "$current" = "reverse" ]; then
+    set_value CDN_IP_MODE "official"
+    echo "已切换为 Cloudflare CDN 官方 IP 模式"
+  else
+    set_value CDN_IP_MODE "reverse"
+    echo "已切换为 CDN 反代 IP 模式"
+  fi
+}
+
+toggle_domain_mode() {
+  current="$(get_value DOMAIN_UPDATE_MODE)"
+  if [ "$current" = "one_to_one" ]; then
+    set_value DOMAIN_UPDATE_MODE "multi"
+    echo "已切换为多个优选 IP 解析到一个域名方案"
+  else
+    set_value DOMAIN_UPDATE_MODE "one_to_one"
+    echo "已切换为每个优选 IP 解析到每个域名方案"
+  fi
+}
+
+configure_domains() {
+  echo
+  if [ "$(get_value DOMAIN_UPDATE_MODE)" = "one_to_one" ]; then
+    printf "请输入多个完整解析域名，空格分隔，例如 a.example.com b.example.com: "
+    read -r names
+    [ -n "$names" ] && set_value CF_RECORD_NAMES "$names"
+  else
+    printf "请输入完整解析域名，例如 best.example.com: "
+    read -r record
+    [ -n "$record" ] && set_value CF_RECORD_NAME "$record"
+  fi
+  echo "域名配置已保存。"
+}
+
+configure_proxy_plugin() {
+  echo
+  echo "0. 不使用任何插件"
+  echo "1. Passwall"
+  echo "2. Passwall2"
+  echo "3. SSR-Plus"
+  echo "4. Clash"
+  echo "5. OpenClash"
+  echo "6. Bypass"
+  echo "7. V2raya"
+  echo "8. Hello-World"
+  echo "9. Homeproxy"
+  echo "10. MihomoTProxy"
+  echo "11. ShellCrash"
+  printf "请输入代理插件编号（默认 0）: "
+  read -r plugin
+  [ -n "$plugin" ] || plugin=0
+  set_raw PROXY_PLUGIN "$plugin"
+  echo "代理插件配置已保存：$(plugin_name "$plugin")"
+}
+
+configure_wait() {
+  configure_threads
+  printf "请输入重启代理插件后的等待时间秒数（默认 30）: "
+  read -r wait_time
+  [ -n "$wait_time" ] || wait_time=30
+  set_raw PROXY_RESTART_WAIT "$wait_time"
+  echo "等待时间已保存。"
+}
+
+configure_telegram() {
+  echo
+  printf "是否启用 Telegram 通知？选择 1 启用，回车关闭: "
+  read -r choice
+  if [ "$choice" = "1" ]; then
+    printf "请输入 Telegram Bot Token: "
+    read -r bot_token
+    printf "请输入 Telegram 用户 ID: "
+    read -r user_id
+    set_value TELEGRAM_BOT_TOKEN "$bot_token"
+    set_value TELEGRAM_USER_ID "$user_id"
+  else
+    set_value TELEGRAM_BOT_TOKEN ""
+    set_value TELEGRAM_USER_ID ""
+  fi
+  echo "Telegram 配置已保存。"
+}
+
+configure_telegram_api() {
+  printf "请输入 Telegram API 域名（默认 api.telegram.org）: "
+  read -r api
+  [ -n "$api" ] || api="api.telegram.org"
+  set_value TELEGRAM_API "$api"
+  echo "Telegram API 已保存。"
+}
+
+configure_pushplus() {
+  echo
+  printf "是否启用 PushPlus 微信通知？选择 1 启用，回车关闭: "
+  read -r choice
+  if [ "$choice" = "1" ]; then
+    printf "请输入 PushPlus Token: "
+    read -r token
+    set_value PUSHPLUS_TOKEN "$token"
+  else
+    set_value PUSHPLUS_TOKEN ""
+  fi
+  echo "PushPlus 配置已保存。"
+}
+
 toggle_dry_run() {
-  ensure_config
   current="$(get_value DRY_RUN)"
   if [ "$current" = "1" ]; then
     set_raw DRY_RUN 0
-    echo "已切换为 DRY_RUN=0，下次会真实更新 Cloudflare DNS。"
+    echo "已切换为 DRY_RUN=0，下次会真实更新或删除 Cloudflare DNS。"
   else
     set_raw DRY_RUN 1
     echo "已切换为 DRY_RUN=1，下次只测试，不改 DNS。"
@@ -176,36 +323,44 @@ toggle_dry_run() {
 change_menu() {
   while true; do
     clear 2>/dev/null || true
-    echo "变更参数配置"
-    echo "============"
-    echo "1. 切换推送模式（安全版固定为域名解析推送）"
-    echo "2. 切换 CDN IP 来源（安全版固定为官方 IP 列表）"
-    echo "3. 切换域名解析方案（安全版固定为单记录更新）"
-    echo "4. 切换优选 IPv4 / IPv6"
+    echo "更改各项参数配置"
+    echo "================"
+    echo "1. 切换推送模式（域名解析推送 / IP 直接推送）"
+    echo "2. 切换 CDN IP 来源（官方 IP / 反代 IP）"
+    echo "3. 切换域名解析方案（多 IP 到一域名 / 每 IP 到每域名）"
+    echo "4. 切换优选 IPv4 或 IPv6"
     echo "5. 更换端口"
     echo "6. 开启、关闭测速，更换测速网站"
-    echo "7. 更换代理插件（安全版不自动控制代理插件）"
-    echo "8. 更改 cfst 总超时时间、线程、结果数量"
+    echo "7. 更换 OpenWrt 代理插件"
+    echo "8. 更改测速线程、显示数量、总超时、代理重启等待时间"
     echo "9. 更换 Cloudflare 解析域名"
     echo "10. 更换 Cloudflare API Token / Zone ID"
-    echo "11. 通知配置（暂未实现，避免保存第三方 token）"
-    echo "12. 切换 DRY_RUN 安全测试模式"
-    echo "13. 查看当前配置"
-    echo "14. 返回主菜单"
+    echo "11. 关闭、开启 Telegram 通知，更换 Token、用户 ID"
+    echo "12. 切换 Telegram API 接口域名"
+    echo "13. 关闭、开启 PushPlus 微信通知，更换 Token"
+    echo "14. 切换 DRY_RUN 安全测试模式"
+    echo "15. 查看当前配置"
+    echo "0. 返回主菜单"
     echo
     printf "请输入: "
     read -r choice
     case "$choice" in
-      1|2|3|7|11) echo "安全版保留该菜单项，但不执行此类高风险自动变更。"; pause ;;
+      1) toggle_push_mode; pause ;;
+      2) toggle_cdn_source; pause ;;
+      3) toggle_domain_mode; pause ;;
       4) configure_ip_version; pause ;;
       5) configure_port; pause ;;
       6) configure_speed_url; pause ;;
-      8) configure_threads; pause ;;
-      9) printf "请输入完整解析域名，例如 best.example.com: "; read -r record; [ -n "$record" ] && set_value CF_RECORD_NAME "$record"; pause ;;
+      7) configure_proxy_plugin; pause ;;
+      8) configure_wait; pause ;;
+      9) configure_domains; pause ;;
       10) configure_cloudflare; pause ;;
-      12) toggle_dry_run; pause ;;
-      13) print_status; pause ;;
-      14) return ;;
+      11) configure_telegram; pause ;;
+      12) configure_telegram_api; pause ;;
+      13) configure_pushplus; pause ;;
+      14) toggle_dry_run; pause ;;
+      15) print_status; pause ;;
+      0) return ;;
       *) echo "输入有误"; pause ;;
     esac
   done
@@ -214,17 +369,43 @@ change_menu() {
 install_flow() {
   ensure_config
   echo
-  echo "首次配置向导"
-  echo "=========="
-  configure_cloudflare
+  echo "安装/重置脚本配置向导"
+  echo "===================="
+  echo "1. 域名解析推送模式（需要域名，推荐）"
+  echo "2. IP 直接推送模式（无需域名）"
+  printf "请选择: "
+  read -r push_choice
+  [ "$push_choice" = "2" ] && set_value PUSH_MODE "ip" || set_value PUSH_MODE "domain"
+
+  if [ "$(get_value PUSH_MODE)" = "domain" ]; then
+    echo "1. 多个优选 IP 解析到一个域名"
+    echo "2. 每个优选 IP 解析到每个域名"
+    printf "请选择: "
+    read -r domain_choice
+    [ "$domain_choice" = "2" ] && set_value DOMAIN_UPDATE_MODE "one_to_one" || set_value DOMAIN_UPDATE_MODE "multi"
+    configure_domains
+    configure_cloudflare
+  fi
+
+  echo "1. Cloudflare CDN 官方 IP（推荐）"
+  echo "2. CDN 反代 IP"
+  printf "请选择（回车默认官方 IP）: "
+  read -r source_choice
+  [ "$source_choice" = "2" ] && set_value CDN_IP_MODE "reverse" || set_value CDN_IP_MODE "official"
+
   configure_ip_version
   configure_port
   configure_speed_url
   configure_threads
-  echo
-  echo "首次建议保持 DRY_RUN=1，先测试不修改 DNS。"
+  configure_proxy_plugin
+  printf "请输入重启代理插件后的等待时间秒数（默认 30）: "
+  read -r wait_time
+  [ -n "$wait_time" ] || wait_time=30
+  set_raw PROXY_RESTART_WAIT "$wait_time"
+  configure_telegram
+  configure_pushplus
   set_raw DRY_RUN 1
-  echo "配置完成。"
+  echo "配置完成。首次已保持 DRY_RUN=1，请先运行一次测试。"
 }
 
 run_now() {
@@ -233,33 +414,53 @@ run_now() {
   "$RUNNER"
 }
 
+delete_dns_records() {
+  ensure_config
+  echo "删除 CF 域名指定名称解析记录"
+  echo "当前 DRY_RUN=$(get_value DRY_RUN)。DRY_RUN=1 时只预览不删除。"
+  configure_cloudflare
+  printf "请输入要删除的完整解析域名，例如 best.example.com: "
+  read -r name
+  [ -n "$name" ] || name="$(get_value CF_RECORD_NAME)"
+  DELETE_RECORD_NAME="$name" "$RUNNER" delete-records
+}
+
 show_log() {
   if [ -f "$LOG_FILE" ]; then
-    tail -n 100 "$LOG_FILE"
+    tail -n 120 "$LOG_FILE"
   else
     echo "暂无日志：$LOG_FILE"
   fi
 }
 
 remove_project() {
-  echo "为了防止误删，安全版不自动删除目录。"
-  echo "如确认卸载，请手动删除目录：$APP_DIR"
+  echo "即将卸载：$APP_DIR"
+  printf "确认卸载请输入 YES: "
+  read -r confirm
+  if [ "$confirm" = "YES" ]; then
+    rm -rf "$APP_DIR"
+    echo "卸载完成"
+    exit 0
+  fi
+  echo "已取消卸载"
 }
 
 main_menu() {
   ensure_config
   while true; do
     clear 2>/dev/null || true
-    echo "Cloudflare 优选 IP 自动更新脚本（安全修正版）"
-    echo "=========================================="
-    echo "1. 安装/首次配置"
-    echo "2. 变更参数配置"
-    echo "3. 立即执行优选并更新 DNS"
-    echo "4. 域名清理（安全版暂不自动批量删除 DNS）"
-    echo "5. 卸载脚本"
-    echo "6. 查看当前配置"
-    echo "7. 查看运行日志"
-    echo "0. 退出"
+    echo "--------------------------------------------------------------"
+    echo "OpenWrt软路由-优选IP解析到CF域名脚本（安全修正版）"
+    echo "--------------------------------------------------------------"
+    print_status
+    echo "--------------------------------------------------------------"
+    echo "1.安装/重置脚本"
+    echo "2.更改各项参数配置"
+    echo "3.运行一次已配置完成的脚本"
+    echo "4.删除CF域名指定名称解析记录"
+    echo "5.卸载"
+    echo "6.查看运行日志"
+    echo "0.退出"
     echo
     printf "请选择: "
     read -r choice
@@ -267,10 +468,9 @@ main_menu() {
       1) install_flow; pause ;;
       2) change_menu ;;
       3) run_now; pause ;;
-      4) echo "安全版不做批量删除 DNS。请在 Cloudflare 后台确认后手动清理。"; pause ;;
+      4) delete_dns_records; pause ;;
       5) remove_project; pause ;;
-      6) print_status; pause ;;
-      7) show_log; pause ;;
+      6) show_log; pause ;;
       0) exit 0 ;;
       *) echo "输入有误"; pause ;;
     esac
