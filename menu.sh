@@ -76,39 +76,40 @@ print_status() {
   ensure_config
   echo
   echo "当前配置："
-  [ "$(get_value PUSH_MODE)" = "domain" ] && echo "1、当前为域名解析推送模式（需要域名，推荐）" || echo "1、当前为 IP 直接推送模式（无需域名）"
-  [ "$(get_value CDN_IP_MODE)" = "reverse" ] && echo "2、当前为 CDN 反代 IP 模式" || echo "2、当前为 Cloudflare CDN 官方 IP 模式"
+  [ "$(get_value PUSH_MODE)" = "domain" ] && echo "- 推送模式：域名解析推送（需要域名，推荐）" || echo "- 推送模式：IP 直接推送（无需域名）"
+  [ "$(get_value CDN_IP_MODE)" = "reverse" ] && echo "- IP 来源：CDN 反代 IP" || echo "- IP 来源：Cloudflare CDN 官方 IP"
   if [ "$(get_value DOMAIN_UPDATE_MODE)" = "one_to_one" ]; then
-    echo "3、当前为每个优选 IP 解析到每个域名方案"
+    echo "- 解析方案：每个优选 IP 解析到每个域名"
   else
-    echo "3、当前为多个优选 IP 解析到一个域名方案"
+    echo "- 解析方案：多个优选 IP 解析到一个域名"
   fi
-  echo "4、当前为优选 $(get_value IP_VERSION)"
-  echo "5、使用的端口：$(get_value CFST_PORT)"
+  echo "- 优选类型：$(get_value IP_VERSION)"
+  echo "- 使用端口：$(get_value CFST_PORT)"
   if [ -n "$(get_value CFST_URL)" ]; then
-    echo "6、测速已开启，测速地址：$(get_value CFST_URL)"
+    echo "- 下载测速：已开启，地址：$(get_value CFST_URL)"
   else
-    echo "6、当前已关闭下载测速，只做延迟优选"
+    echo "- 下载测速：已关闭，只做延迟优选"
   fi
-  echo "7、代理插件：$(plugin_name "$(get_value PROXY_PLUGIN)")"
-  echo "8、重启代理插件后等待：$(get_value PROXY_RESTART_WAIT) 秒；cfst 总超时：$(get_value CFST_TOTAL_TIMEOUT) 秒"
-  echo "9、multi 域名：$(get_value CF_RECORD_NAME)"
-  echo "9、one_to_one 域名列表：$(get_value CF_RECORD_NAMES)"
-  echo "10、Cloudflare Zone ID：$(get_value CF_ZONE_ID)"
-  echo "10、Cloudflare API Token：$(mask_token "$(get_value CF_API_TOKEN)")"
+  echo "- 代理插件：$(plugin_name "$(get_value PROXY_PLUGIN)")"
+  echo "- 代理重启等待：$(get_value PROXY_RESTART_WAIT) 秒"
+  echo "- cfst 总超时：$(get_value CFST_TOTAL_TIMEOUT) 秒"
+  echo "- multi 域名：$(get_value CF_RECORD_NAME)"
+  echo "- one_to_one 域名列表：$(get_value CF_RECORD_NAMES)"
+  echo "- Cloudflare Zone ID：$(get_value CF_ZONE_ID)"
+  echo "- Cloudflare API Token：$(mask_token "$(get_value CF_API_TOKEN)")"
   if [ -n "$(get_value TELEGRAM_BOT_TOKEN)" ]; then
-    echo "11、Telegram：已配置"
+    echo "- Telegram：已配置"
   else
-    echo "11、Telegram：未配置"
+    echo "- Telegram：未配置"
   fi
-  echo "12、Telegram API：$(get_value TELEGRAM_API)"
+  echo "- Telegram API：$(get_value TELEGRAM_API)"
   if [ -n "$(get_value PUSHPLUS_TOKEN)" ]; then
-    echo "13、PushPlus：已配置"
+    echo "- PushPlus：已配置"
   else
-    echo "13、PushPlus：未配置"
+    echo "- PushPlus：未配置"
   fi
-  echo "DRY_RUN：$(get_value DRY_RUN)"
-  echo "测速线程/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_COUNT)"
+  echo "- DRY_RUN：$(get_value DRY_RUN)"
+  echo "- 测速线程/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_COUNT)"
 }
 
 configure_cloudflare() {
