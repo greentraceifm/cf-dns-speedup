@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/ea8ec3
 ```
 
 The installer creates `/root/cf-dns-speedup` and downloads the runtime files.
-After installation it opens an interactive setup menu.
+After installation it opens an interactive setup menu similar to the original project.
 
 Open the menu again later:
 
@@ -66,7 +66,7 @@ After install, use the menu:
 /root/cf-dns-speedup/menu.sh
 ```
 
-Choose `Configure Cloudflare`, then fill in:
+Choose `1. 安装/首次配置`, then fill in:
 
 ```sh
 CF_API_TOKEN="your_cloudflare_api_token"
@@ -80,7 +80,7 @@ For the first run, keep:
 DRY_RUN=1
 ```
 
-Then choose `Run now`.
+Then choose `3. 立即执行优选并更新 DNS`.
 
 You can also run directly:
 
@@ -108,6 +108,27 @@ Create a Cloudflare API Token with:
 - Scope limited to the target zone only
 
 Do not use the Global API Key.
+
+## Menu Compatibility
+
+The menu intentionally follows the original project's workflow:
+
+- `1. 安装/首次配置`
+- `2. 变更参数配置`
+- `3. 立即执行优选并更新 DNS`
+- `4. 域名清理`
+- `5. 卸载脚本`
+
+The `变更参数配置` submenu keeps the original 1-13 style options where practical.
+
+Some high-risk original behaviors are intentionally disabled or made explicit:
+
+- No obfuscated `eval` or nested `base64 | bash`.
+- No automatic stop/start of PassWall, OpenClash, or other proxy plugins.
+- No automatic batch deletion of Cloudflare DNS records.
+- No Global API Key; use least-privilege Cloudflare API Token.
+- `cfst` is wrapped by `CFST_TOTAL_TIMEOUT` to avoid hanging forever.
+- First run keeps `DRY_RUN=1` so DNS is not changed until you switch it off.
 
 ## Repository Privacy
 
