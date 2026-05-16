@@ -1,202 +1,140 @@
 # cf-dns-speedup
 
-Readable OpenWrt script for selecting a fast Cloudflare CDN IP and updating one Cloudflare DNS record.
+Cloudflare 优选 IP 自动更新脚本，面向 OpenWrt 使用。
 
-This is a safer replacement for `curl | bash` style scripts:
+这是对原 `cdnopw` 思路的安全修正版：尽量保留中文菜单和原项目使用流程，只修正关键风险和容易卡死的问题。
 
-- No obfuscation.
-- No automatic proxy plugin stop/start.
-- Uses Cloudflare API Token instead of Global API Key.
-- Adds a total timeout around CloudflareSpeedTest so the job cannot hang forever.
-- First run defaults to `DRY_RUN=1`, so Cloudflare DNS is not changed until you explicitly allow it.
+## 修正内容
 
-## OpenWrt Install
+- 保留中文交互菜单。
+- 保留“安装/变更配置/立即执行/域名清理/卸载”的主流程。
+- 去除混淆代码，不使用 `eval` 和多层 `base64 | bash`。
+- 使用 Cloudflare API Token，不使用 Global API Key。
+- `cfst` 增加总超时，避免测速阶段无限卡死。
+- 默认 `DRY_RUN=1`，首次运行只测试，不修改 DNS。
+- 不自动停止或重启 PassWall、OpenClash 等代理插件，避免路由器断网。
+- 不自动批量删除 Cloudflare DNS 记录，避免误删解析。
 
-One-line install from this GitHub repository:
+## 一键安装
+
+推荐安装命令：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/main/install-openwrt.sh | sh
 ```
 
-If GitHub raw cache has not refreshed after a new release, use the pinned commit installer:
+如果 GitHub raw 缓存还没刷新，用固定最新版：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/ea8ec328706a5b7f5e1bf8a5d2e3b616b4327a6b/install-openwrt.sh | sh
+curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/dc48384337a3d7578d6678d0a9c1349f72f29a22/install-openwrt.sh | sh
 ```
 
-The installer creates `/root/cf-dns-speedup` and downloads the runtime files.
-After installation it opens an interactive setup menu similar to the original project.
+安装完成后会自动打开中文菜单。
 
-Open the menu again later:
-
-```sh
-/root/cf-dns-speedup/menu.sh
-```
-
-Manual install:
-
-```sh
-mkdir -p /root/cf-dns-speedup
-cd /root/cf-dns-speedup
-```
-
-Copy these files into the directory:
-
-- `cf-dns-speedup.sh`
-- `config.example.env`
-- `menu.sh`
-
-Then:
-
-```sh
-cp config.example.env config.env
-chmod +x cf-dns-speedup.sh
-chmod +x menu.sh
-chmod 600 config.env
-./menu.sh
-```
-
-Keep `DRY_RUN=1` for the first test.
-
-## First-Time Setup Flow
-
-After install, use the menu:
+以后再次打开菜单：
 
 ```sh
 /root/cf-dns-speedup/menu.sh
 ```
 
-Choose `1. 安装/首次配置`, then fill in:
+## 中文菜单
 
-```sh
-CF_API_TOKEN="your_cloudflare_api_token"
-CF_ZONE_ID="your_cloudflare_zone_id"
-CF_RECORD_NAME="best.example.com"
+主菜单：
+
+```text
+1. 安装/首次配置
+2. 变更参数配置
+3. 立即执行优选并更新 DNS
+4. 域名清理（安全版暂不自动批量删除 DNS）
+5. 卸载脚本
+6. 查看当前配置
+7. 查看运行日志
+0. 退出
 ```
 
-For the first run, keep:
+变更参数配置菜单：
 
-```sh
-DRY_RUN=1
+```text
+1. 切换推送模式（安全版固定为域名解析推送）
+2. 切换 CDN IP 来源（安全版固定为官方 IP 列表）
+3. 切换域名解析方案（安全版固定为单记录更新）
+4. 切换优选 IPv4 / IPv6
+5. 更换端口
+6. 开启、关闭测速，更换测速网站
+7. 更换代理插件（安全版不自动控制代理插件）
+8. 更改 cfst 总超时时间、线程、结果数量
+9. 更换 Cloudflare 解析域名
+10. 更换 Cloudflare API Token / Zone ID
+11. 通知配置（暂未实现，避免保存第三方 token）
+12. 切换 DRY_RUN 安全测试模式
+13. 查看当前配置
+14. 返回主菜单
 ```
 
-Then choose `3. 立即执行优选并更新 DNS`.
+## 首次使用流程
 
-You can also run directly:
+1. 运行一键安装命令。
+2. 选择 `1. 安装/首次配置`。
+3. 输入 Cloudflare API Token、Zone ID、完整解析域名。
+4. 首次保持 `DRY_RUN=1`。
+5. 选择 `3. 立即执行优选并更新 DNS`。
+6. 查看日志，确认出现 `dry-run: would update ...`。
+7. 回到菜单，选择 `12. 切换 DRY_RUN 安全测试模式`，切换为 `DRY_RUN=0`。
+8. 再次执行，才会真实更新 Cloudflare DNS。
 
-```sh
-/root/cf-dns-speedup/cf-dns-speedup.sh
-cat /root/cf-dns-speedup/run.log
-```
+## Cloudflare Token 权限
 
-If the log says `dry-run: would update ...`, the script is working and Cloudflare DNS was not changed.
+请创建 Cloudflare API Token，不要使用 Global API Key。
 
-Only then set:
-
-```sh
-DRY_RUN=0
-```
-
-Run again to really update Cloudflare DNS.
-
-## Cloudflare Token
-
-Create a Cloudflare API Token with:
+建议权限：
 
 - `Zone:Read`
 - `DNS:Edit`
-- Scope limited to the target zone only
+- 作用范围只限制在目标域名 Zone
 
-Do not use the Global API Key.
+## 配置文件
 
-## Menu Compatibility
-
-The menu intentionally follows the original project's workflow:
-
-- `1. 安装/首次配置`
-- `2. 变更参数配置`
-- `3. 立即执行优选并更新 DNS`
-- `4. 域名清理`
-- `5. 卸载脚本`
-
-The `变更参数配置` submenu keeps the original 1-13 style options where practical.
-
-Some high-risk original behaviors are intentionally disabled or made explicit:
-
-- No obfuscated `eval` or nested `base64 | bash`.
-- No automatic stop/start of PassWall, OpenClash, or other proxy plugins.
-- No automatic batch deletion of Cloudflare DNS records.
-- No Global API Key; use least-privilege Cloudflare API Token.
-- `cfst` is wrapped by `CFST_TOTAL_TIMEOUT` to avoid hanging forever.
-- First run keeps `DRY_RUN=1` so DNS is not changed until you switch it off.
-
-## Repository Privacy
-
-This repository is currently public:
-
-```text
-https://github.com/greentraceifm/cf-dns-speedup
-```
-
-Public means other people can see the script and documentation. This is acceptable for this project because real secrets are not committed. Keep actual values only in `/root/cf-dns-speedup/config.env` on your OpenWrt device.
-
-Never commit:
-
-- `config.env`
-- Cloudflare API tokens
-- Cloudflare Global API Key
-- real Telegram or PushPlus tokens
-
-If you want to make the repository private:
+真实配置保存在 OpenWrt：
 
 ```sh
-gh repo edit greentraceifm/cf-dns-speedup --visibility private
+/root/cf-dns-speedup/config.env
 ```
 
-Note: a private repository will break the simple public one-line `curl` install unless you use authenticated GitHub access or another private delivery method.
+不要把真实的 `config.env` 上传到 GitHub。
 
-## First Test
+## 定时任务
 
-```sh
-/root/cf-dns-speedup/cf-dns-speedup.sh
-cat /root/cf-dns-speedup/run.log
-```
-
-If the log says `dry-run: would update ...`, the script is working without changing DNS.
-
-Then set:
-
-```sh
-DRY_RUN=0
-```
-
-Run again.
-
-## Cron Example
-
-Run every day at 03:00:
+每天凌晨 3 点执行：
 
 ```cron
 0 3 * * * /root/cf-dns-speedup/cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1
 ```
 
-## Troubleshooting
+## 仓库隐私
 
-If the script stops at speed test, it will now fail after `CFST_TOTAL_TIMEOUT` seconds instead of hanging forever.
+当前仓库是公开仓库：
 
-Useful conservative settings for routers:
-
-```sh
-CFST_THREADS=16
-CFST_COUNT=3
-CFST_TOTAL_TIMEOUT=600
-CFST_URL=""
+```text
+https://github.com/greentraceifm/cf-dns-speedup
 ```
 
-If you want real download speed testing, set a URL such as:
+别人可以看到代码和文档，但看不到你的真实 Cloudflare Token。真实密钥只应保存在 OpenWrt 本机的 `config.env`。
+
+如果改成私有仓库，公开一键安装命令会失效，需要额外配置 GitHub 认证拉取。
+
+## 故障排查
+
+查看日志：
 
 ```sh
-CFST_URL="https://speed.cloudflare.com/__down?bytes=104857600"
+cat /root/cf-dns-speedup/run.log
 ```
 
-Latency-only mode is often more stable on OpenWrt.
+如果测速仍然慢或容易失败，建议在菜单里把参数调保守：
+
+```text
+测速线程：16
+结果数量：3
+总超时：600
+测速网站：留空，只做延迟优选
+```
