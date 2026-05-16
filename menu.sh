@@ -93,6 +93,8 @@ print_status() {
   echo "- 代理插件：$(plugin_name "$(get_value PROXY_PLUGIN)")"
   echo "- 代理重启等待：$(get_value PROXY_RESTART_WAIT) 秒"
   echo "- cfst 总超时：$(get_value CFST_TOTAL_TIMEOUT) 秒"
+  echo "- cfst 单 IP 超时：$(get_value CFST_TIMEOUT) 秒；下载超时：$(get_value CFST_DOWNLOAD_TIMEOUT) 秒"
+  echo "- 延迟范围：$(get_value CFST_MIN_LATENCY)-$(get_value CFST_MAX_LATENCY) ms；下载速度下限：$(get_value CFST_MIN_SPEED) MB/s"
   echo "- multi 域名：$(get_value CF_RECORD_NAME)"
   echo "- one_to_one 域名列表：$(get_value CF_RECORD_NAMES)"
   echo "- Cloudflare Zone ID：$(get_value CF_ZONE_ID)"
@@ -190,6 +192,26 @@ configure_threads() {
   read -r total_timeout
   [ -n "$total_timeout" ] || total_timeout=900
   set_raw CFST_TOTAL_TIMEOUT "$total_timeout"
+  printf "请输入单个 IP 延迟测试超时秒数（默认 4）: "
+  read -r timeout
+  [ -n "$timeout" ] || timeout=4
+  set_raw CFST_TIMEOUT "$timeout"
+  printf "请输入下载测速超时秒数（默认 15；测速为 0 可试 20）: "
+  read -r download_timeout
+  [ -n "$download_timeout" ] || download_timeout=15
+  set_raw CFST_DOWNLOAD_TIMEOUT "$download_timeout"
+  printf "请输入平均延迟下限 ms（默认 0，一般不用过滤）: "
+  read -r min_latency
+  [ -n "$min_latency" ] || min_latency=0
+  set_raw CFST_MIN_LATENCY "$min_latency"
+  printf "请输入平均延迟上限 ms（默认 300；想不限制可填 9999）: "
+  read -r max_latency
+  [ -n "$max_latency" ] || max_latency=300
+  set_raw CFST_MAX_LATENCY "$max_latency"
+  printf "请输入下载速度下限 MB/s（默认 0；确认测速正常后可填 1）: "
+  read -r min_speed
+  [ -n "$min_speed" ] || min_speed=0
+  set_raw CFST_MIN_SPEED "$min_speed"
   echo "测速参数已保存。"
 }
 
@@ -333,7 +355,7 @@ change_menu() {
     echo "5. 更换端口"
     echo "6. 开启、关闭测速，更换测速网站"
     echo "7. 更换 OpenWrt 代理插件"
-    echo "8. 更改测速线程、显示数量、总超时、代理重启等待时间"
+    echo "8. 更改测速线程、显示数量、超时、延迟/速度阈值、代理重启等待时间"
     echo "9. 更换 Cloudflare 解析域名"
     echo "10. 更换 Cloudflare API Token / Zone ID"
     echo "11. 关闭、开启 Telegram 通知，更换 Token、用户 ID"

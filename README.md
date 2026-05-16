@@ -109,8 +109,10 @@ curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/dc4838
 每天凌晨 3 点执行：
 
 ```cron
-0 3 * * * /root/cf-dns-speedup/cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1
+0 3 * * * cd /root/cf-dns-speedup && /usr/bin/env bash ./cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1
 ```
+
+这个写法和旧脚本的 `cd /root/cfipopw/ && bash cdnip.sh` 思路一致：先进入脚本目录，再用 `bash` 显式执行，并把 cron 自身输出写到 `/tmp/cf-dns-speedup.cron.log`。脚本的主日志仍在 `/root/cf-dns-speedup/run.log`。
 
 ## 仓库隐私
 
@@ -178,5 +180,9 @@ cat /root/cf-dns-speedup/cfst-output.log
 测速线程：16
 结果数量：3
 总超时：600
+平均延迟上限：300
+平均延迟下限：0
+下载速度下限：0
+下载超时：15
 测速网站：留空，只做延迟优选
 ```

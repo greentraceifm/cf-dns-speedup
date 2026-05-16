@@ -551,7 +551,7 @@ run_once() {
   identify_reverse_ip_regions
   update_cloudflare
   send_notifications
-  log "执行完成。定时任务示例：0 3 * * * /root/cf-dns-speedup/cf-dns-speedup.sh"
+  log "执行完成。定时任务示例：0 3 * * * cd /root/cf-dns-speedup && /usr/bin/env bash ./cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1"
 }
 
 delete_records_command() {
