@@ -120,8 +120,9 @@ run_speedtest() {
   fi
 
   log "run cfst with total timeout ${CFST_TOTAL_TIMEOUT}s"
+  log "cfst output will be shown below and saved to $LOG_FILE"
   # shellcheck disable=SC2086
-  if ! timeout "$CFST_TOTAL_TIMEOUT" "$CFST_BIN" $args >>"$LOG_FILE" 2>&1; then
+  if ! timeout "$CFST_TOTAL_TIMEOUT" "$CFST_BIN" $args 2>&1 | tee -a "$LOG_FILE"; then
     die "cfst failed or timed out; see $LOG_FILE"
   fi
 
