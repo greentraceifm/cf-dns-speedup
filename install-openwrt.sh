@@ -2,7 +2,7 @@
 set -eu
 
 APP_DIR="${APP_DIR:-/root/cf-dns-speedup}"
-REPO_RAW_BASE="${REPO_RAW_BASE:-}"
+REPO_RAW_BASE="${REPO_RAW_BASE:-https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/main}"
 
 mkdir -p "$APP_DIR"
 
