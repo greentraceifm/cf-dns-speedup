@@ -254,10 +254,22 @@ run_speedtest() {
   fi
 
   log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，显示数量 $CFST_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
-  log "测速：下面显示 cfst 实时进度和速度，同时写入 $LOG_FILE"
-  # shellcheck disable=SC2086
-  if ! timeout "$CFST_TOTAL_TIMEOUT" "$CFST_BIN" $args 2>&1 | tee -a "$LOG_FILE"; then
-    die "cfst 执行失败或超过总超时，请查看 $LOG_FILE"
+  log "测速：下面显示 cfst 实时进度和速度；主日志只记录关键步骤，避免进度刷屏"
+  local cfst_raw_log="$APP_DIR/cfst-output.log"
+  rm -f "$cfst_raw_log"
+  if [ -t 1 ]; then
+    # cfst 检测到真实终端时会用同一行刷新进度；不要通过 tee 管道输出。
+    # shellcheck disable=SC2086
+    if ! timeout "$CFST_TOTAL_TIMEOUT" "$CFST_BIN" $args; then
+      die "cfst 执行失败或超过总超时，请查看 $LOG_FILE"
+    fi
+  else
+    log "测速：非交互运行，cfst 原始输出写入 $cfst_raw_log"
+    # shellcheck disable=SC2086
+    if ! timeout "$CFST_TOTAL_TIMEOUT" "$CFST_BIN" $args >"$cfst_raw_log" 2>&1; then
+      tail -n 80 "$cfst_raw_log" >>"$LOG_FILE" 2>/dev/null || true
+      die "cfst 执行失败或超过总超时，请查看 $cfst_raw_log"
+    fi
   fi
 
   [ -s "$RESULT_FILE" ] || die "cfst 未生成 result.csv"

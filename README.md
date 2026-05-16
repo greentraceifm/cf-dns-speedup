@@ -11,7 +11,7 @@ Cloudflare 优选 IP 自动更新脚本，面向 OpenWrt 使用。
 - 去除混淆代码，不使用 `eval` 和多层 `base64 | bash`。
 - 使用 Cloudflare API Token，不使用 Global API Key。
 - `cfst` 增加总超时，避免测速阶段无限卡死。
-- 测速时保留 `cfst` 实时输出，可以看到进度和速度，同时写入日志。
+- 测速时保留 `cfst` 实时输出，可以看到进度和速度；交互终端保持同一行刷新，主日志只记录关键步骤。
 - 默认 `DRY_RUN=1`，首次运行只测试，不修改 DNS。
 - 不自动停止或重启 PassWall、OpenClash 等代理插件，避免路由器断网。
 - 不自动批量删除 Cloudflare DNS 记录，避免误删解析。
@@ -130,6 +130,12 @@ https://github.com/greentraceifm/cf-dns-speedup
 
 ```sh
 cat /root/cf-dns-speedup/run.log
+```
+
+`run.log` 只记录关键步骤、优选结果和 DNS 更新过程。手动运行菜单时，`cfst` 进度会在终端同一行刷新；定时任务等非交互运行时，`cfst` 原始输出会写入：
+
+```sh
+cat /root/cf-dns-speedup/cfst-output.log
 ```
 
 ## 与原项目功能对齐
