@@ -12,6 +12,22 @@ This is a safer replacement for `curl | bash` style scripts:
 
 ## OpenWrt Install
 
+One-line install from this GitHub repository:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/main/install-openwrt.sh | sh
+```
+
+If GitHub raw cache has not refreshed after a new release, use the pinned commit installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/ea8ec328706a5b7f5e1bf8a5d2e3b616b4327a6b/install-openwrt.sh | sh
+```
+
+The installer creates `/root/cf-dns-speedup` and downloads the runtime files.
+
+Manual install:
+
 ```sh
 mkdir -p /root/cf-dns-speedup
 cd /root/cf-dns-speedup
@@ -33,6 +49,45 @@ vi config.env
 
 Keep `DRY_RUN=1` for the first test.
 
+## First-Time Setup Flow
+
+After install:
+
+```sh
+vi /root/cf-dns-speedup/config.env
+```
+
+Fill in:
+
+```sh
+CF_API_TOKEN="your_cloudflare_api_token"
+CF_ZONE_ID="your_cloudflare_zone_id"
+CF_RECORD_NAME="best.example.com"
+```
+
+For the first run, keep:
+
+```sh
+DRY_RUN=1
+```
+
+Then test:
+
+```sh
+/root/cf-dns-speedup/cf-dns-speedup.sh
+cat /root/cf-dns-speedup/run.log
+```
+
+If the log says `dry-run: would update ...`, the script is working and Cloudflare DNS was not changed.
+
+Only then set:
+
+```sh
+DRY_RUN=0
+```
+
+Run again to really update Cloudflare DNS.
+
 ## Cloudflare Token
 
 Create a Cloudflare API Token with:
@@ -42,6 +97,31 @@ Create a Cloudflare API Token with:
 - Scope limited to the target zone only
 
 Do not use the Global API Key.
+
+## Repository Privacy
+
+This repository is currently public:
+
+```text
+https://github.com/greentraceifm/cf-dns-speedup
+```
+
+Public means other people can see the script and documentation. This is acceptable for this project because real secrets are not committed. Keep actual values only in `/root/cf-dns-speedup/config.env` on your OpenWrt device.
+
+Never commit:
+
+- `config.env`
+- Cloudflare API tokens
+- Cloudflare Global API Key
+- real Telegram or PushPlus tokens
+
+If you want to make the repository private:
+
+```sh
+gh repo edit greentraceifm/cf-dns-speedup --visibility private
+```
+
+Note: a private repository will break the simple public one-line `curl` install unless you use authenticated GitHub access or another private delivery method.
 
 ## First Test
 
