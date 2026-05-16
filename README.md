@@ -25,6 +25,13 @@ curl -fsSL https://raw.githubusercontent.com/greentraceifm/cf-dns-speedup/ea8ec3
 ```
 
 The installer creates `/root/cf-dns-speedup` and downloads the runtime files.
+After installation it opens an interactive setup menu.
+
+Open the menu again later:
+
+```sh
+/root/cf-dns-speedup/menu.sh
+```
 
 Manual install:
 
@@ -37,27 +44,29 @@ Copy these files into the directory:
 
 - `cf-dns-speedup.sh`
 - `config.example.env`
+- `menu.sh`
 
 Then:
 
 ```sh
 cp config.example.env config.env
 chmod +x cf-dns-speedup.sh
+chmod +x menu.sh
 chmod 600 config.env
-vi config.env
+./menu.sh
 ```
 
 Keep `DRY_RUN=1` for the first test.
 
 ## First-Time Setup Flow
 
-After install:
+After install, use the menu:
 
 ```sh
-vi /root/cf-dns-speedup/config.env
+/root/cf-dns-speedup/menu.sh
 ```
 
-Fill in:
+Choose `Configure Cloudflare`, then fill in:
 
 ```sh
 CF_API_TOKEN="your_cloudflare_api_token"
@@ -71,7 +80,9 @@ For the first run, keep:
 DRY_RUN=1
 ```
 
-Then test:
+Then choose `Run now`.
+
+You can also run directly:
 
 ```sh
 /root/cf-dns-speedup/cf-dns-speedup.sh
