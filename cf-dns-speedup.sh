@@ -8,6 +8,12 @@ IP_FILE="${IP_FILE:-$APP_DIR/ip.txt}"
 RESULT_FILE="${RESULT_FILE:-$APP_DIR/result.csv}"
 LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
+CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
+LOCK_DIR="${LOCK_DIR:-/tmp/cf-dns-speedup.lock}"
+LAST_RUN_SUMMARY="${LAST_RUN_SUMMARY:-$APP_DIR/last-run.summary}"
+LAST_RUN_JSON="${LAST_RUN_JSON:-$APP_DIR/last-run.json}"
+LOG_MAX_KB="${LOG_MAX_KB:-1024}"
+LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-14}"
 
 CFST_SOURCE_BASE="${CFST_SOURCE_BASE:-https://gitlab.com/rwkgyg/CFwarp/-/raw/main/point/cpu3}"
 DEFAULT_IPV4_LIST="${DEFAULT_IPV4_LIST:-https://gitlab.com/rwkgyg/CFwarp/-/raw/main/point/cpu3/ip.txt}"
@@ -17,6 +23,11 @@ REVERSE_ZIP_FALLBACK="${REVERSE_ZIP_FALLBACK:-https://cf.yg-kkk.gq}"
 
 PROXY_STOPPED=0
 PROXY_SERVICE=""
+LOCK_ACQUIRED=0
+RUN_STATUS="not-started"
+RUN_STARTED_AT=""
+RUN_FINISHED_AT=""
+RUN_ERROR=""
 
 log() {
   mkdir -p "$APP_DIR"
@@ -29,6 +40,8 @@ inform() {
 }
 
 die() {
+  RUN_STATUS="failed"
+  RUN_ERROR="$*"
   log "错误：$*"
   exit 1
 }
@@ -69,6 +82,105 @@ load_config() {
   TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
   TELEGRAM_API="${TELEGRAM_API:-api.telegram.org}"
   PUSHPLUS_TOKEN="${PUSHPLUS_TOKEN:-}"
+  LOG_MAX_KB="${LOG_MAX_KB:-1024}"
+  LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-14}"
+}
+
+rotate_file_if_needed() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  [ "${LOG_MAX_KB:-0}" -gt 0 ] 2>/dev/null || return 0
+  local size_kb
+  size_kb="$(du -k "$path" 2>/dev/null | awk '{print $1}')"
+  [ -n "$size_kb" ] || return 0
+  if [ "$size_kb" -gt "$LOG_MAX_KB" ]; then
+    local rotated="${path}.$(date '+%Y%m%d-%H%M%S')"
+    mv "$path" "$rotated"
+    gzip -f "$rotated" 2>/dev/null || true
+    : > "$path"
+  fi
+}
+
+prune_old_logs() {
+  [ "${LOG_KEEP_DAYS:-0}" -gt 0 ] 2>/dev/null || return 0
+  find "$APP_DIR" -maxdepth 1 -type f \( -name 'run.log.*.gz' -o -name 'cfst-output.log.*.gz' \) -mtime "+$LOG_KEEP_DAYS" -delete 2>/dev/null || true
+}
+
+rotate_logs() {
+  mkdir -p "$APP_DIR"
+  rotate_file_if_needed "$LOG_FILE"
+  rotate_file_if_needed "$CFST_RAW_LOG"
+  prune_old_logs
+}
+
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    LOCK_ACQUIRED=1
+    printf '%s\n' "$$" > "$LOCK_DIR/pid"
+    printf '%s\n' "$(date '+%F %T')" > "$LOCK_DIR/started_at"
+    return 0
+  fi
+
+  local pid=""
+  [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    log "已有任务正在运行：pid=$pid，退出以避免重复执行"
+    exit 0
+  fi
+
+  log "检测到陈旧锁：$LOCK_DIR，清理后重新加锁"
+  rm -rf "$LOCK_DIR"
+  mkdir "$LOCK_DIR" || die "无法创建锁目录：$LOCK_DIR"
+  LOCK_ACQUIRED=1
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  printf '%s\n' "$(date '+%F %T')" > "$LOCK_DIR/started_at"
+}
+
+release_lock() {
+  if [ "$LOCK_ACQUIRED" = "1" ]; then
+    rm -rf "$LOCK_DIR"
+    LOCK_ACQUIRED=0
+  fi
+}
+
+json_escape() {
+  jq -Rsa . 2>/dev/null || sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/'
+}
+
+write_run_summary() {
+  RUN_FINISHED_AT="$(date '+%F %T')"
+  local best_ips=""
+  if [ -s "$RESULT_FILE" ]; then
+    best_ips="$(awk -F, -v limit="$CFST_COUNT" 'NR>1 && $1 != "" && count < limit {gsub(/[[:space:]]/, "", $1); if (out != "") out = out " "; out = out $1; count++} END {print out}' "$RESULT_FILE")"
+  fi
+
+  {
+    echo "status=$RUN_STATUS"
+    echo "started_at=$RUN_STARTED_AT"
+    echo "finished_at=$RUN_FINISHED_AT"
+    echo "mode=$PUSH_MODE"
+    echo "domain_update_mode=$DOMAIN_UPDATE_MODE"
+    echo "cdn_ip_mode=$CDN_IP_MODE"
+    echo "dry_run=$DRY_RUN"
+    echo "proxy_service=$PROXY_SERVICE"
+    echo "best_ips=$best_ips"
+    echo "error=$RUN_ERROR"
+  } > "$LAST_RUN_SUMMARY"
+
+  {
+    printf '{\n'
+    printf '  "status": %s,\n' "$(printf '%s' "$RUN_STATUS" | json_escape)"
+    printf '  "started_at": %s,\n' "$(printf '%s' "$RUN_STARTED_AT" | json_escape)"
+    printf '  "finished_at": %s,\n' "$(printf '%s' "$RUN_FINISHED_AT" | json_escape)"
+    printf '  "mode": %s,\n' "$(printf '%s' "$PUSH_MODE" | json_escape)"
+    printf '  "domain_update_mode": %s,\n' "$(printf '%s' "$DOMAIN_UPDATE_MODE" | json_escape)"
+    printf '  "cdn_ip_mode": %s,\n' "$(printf '%s' "$CDN_IP_MODE" | json_escape)"
+    printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
+    printf '  "proxy_service": %s,\n' "$(printf '%s' "$PROXY_SERVICE" | json_escape)"
+    printf '  "best_ips": %s,\n' "$(printf '%s' "$best_ips" | json_escape)"
+    printf '  "error": %s\n' "$(printf '%s' "$RUN_ERROR" | json_escape)"
+    printf '}\n'
+  } > "$LAST_RUN_JSON"
 }
 
 require_cloudflare_config() {
@@ -224,7 +336,17 @@ restart_proxy_if_needed() {
 }
 
 cleanup_on_exit() {
+  local exit_code=$?
+  if [ "$exit_code" -ne 0 ] && [ "$RUN_STATUS" != "failed" ]; then
+    RUN_STATUS="failed"
+    RUN_ERROR="script exited with status $exit_code"
+  fi
   restart_proxy_if_needed || true
+  if [ -n "$RUN_STARTED_AT" ]; then
+    [ "$RUN_STATUS" = "not-started" ] && RUN_STATUS="success"
+    write_run_summary || true
+  fi
+  release_lock
 }
 
 check_cloudflare_auth() {
@@ -255,8 +377,8 @@ run_speedtest() {
 
   log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，显示数量 $CFST_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
   log "测速：下面显示 cfst 实时进度和速度；主日志只记录关键步骤，避免进度刷屏"
-  local cfst_raw_log="$APP_DIR/cfst-output.log"
-  rm -f "$cfst_raw_log"
+  local cfst_raw_log="$CFST_RAW_LOG"
+  : > "$cfst_raw_log"
   if [ -t 1 ]; then
     # cfst 检测到真实终端时会用同一行刷新进度；不要通过 tee 管道输出。
     # shellcheck disable=SC2086
@@ -539,6 +661,11 @@ send_notifications() {
 }
 
 run_once() {
+  acquire_lock
+  rotate_logs
+  RUN_STARTED_AT="$(date '+%F %T')"
+  RUN_STATUS="running"
+  RUN_ERROR=""
   : > "$INFORM_LOG"
   log "------------------------------------------------------------"
   log "Cloudflare 优选 IP 自动更新脚本（安全修正版）开始执行"
@@ -551,6 +678,7 @@ run_once() {
   identify_reverse_ip_regions
   update_cloudflare
   send_notifications
+  RUN_STATUS="success"
   log "执行完成。定时任务示例：30 6 * * * cd /root/cf-dns-speedup && /usr/bin/env bash ./cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1"
 }
 
