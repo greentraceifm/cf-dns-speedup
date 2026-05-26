@@ -67,6 +67,8 @@ load_config() {
   CFST_PORT="${CFST_PORT:-443}"
   CFST_THREADS="${CFST_THREADS:-32}"
   CFST_COUNT="${CFST_COUNT:-5}"
+  CFST_DOWNLOAD_COUNT="${CFST_DOWNLOAD_COUNT:-$CFST_COUNT}"
+  CFST_RESULT_COUNT="${CFST_RESULT_COUNT:-$CFST_COUNT}"
   CFST_TIMEOUT="${CFST_TIMEOUT:-4}"
   CFST_TOTAL_TIMEOUT="${CFST_TOTAL_TIMEOUT:-900}"
   CFST_DOWNLOAD_TIMEOUT="${CFST_DOWNLOAD_TIMEOUT:-8}"
@@ -151,7 +153,7 @@ write_run_summary() {
   RUN_FINISHED_AT="$(date '+%F %T')"
   local best_ips=""
   if [ -s "$RESULT_FILE" ]; then
-    best_ips="$(awk -F, -v limit="$CFST_COUNT" 'NR>1 && $1 != "" && count < limit {gsub(/[[:space:]]/, "", $1); if (out != "") out = out " "; out = out $1; count++} END {print out}' "$RESULT_FILE")"
+    best_ips="$(awk -F, -v limit="$CFST_RESULT_COUNT" 'NR>1 && $1 != "" && count < limit {gsub(/[[:space:]]/, "", $1); if (out != "") out = out " "; out = out $1; count++} END {print out}' "$RESULT_FILE")"
   fi
 
   {
@@ -161,6 +163,8 @@ write_run_summary() {
     echo "mode=$PUSH_MODE"
     echo "domain_update_mode=$DOMAIN_UPDATE_MODE"
     echo "cdn_ip_mode=$CDN_IP_MODE"
+    echo "cfst_download_count=$CFST_DOWNLOAD_COUNT"
+    echo "cfst_result_count=$CFST_RESULT_COUNT"
     echo "dry_run=$DRY_RUN"
     echo "proxy_service=$PROXY_SERVICE"
     echo "best_ips=$best_ips"
@@ -175,6 +179,8 @@ write_run_summary() {
     printf '  "mode": %s,\n' "$(printf '%s' "$PUSH_MODE" | json_escape)"
     printf '  "domain_update_mode": %s,\n' "$(printf '%s' "$DOMAIN_UPDATE_MODE" | json_escape)"
     printf '  "cdn_ip_mode": %s,\n' "$(printf '%s' "$CDN_IP_MODE" | json_escape)"
+    printf '  "cfst_download_count": %s,\n' "$(printf '%s' "$CFST_DOWNLOAD_COUNT" | json_escape)"
+    printf '  "cfst_result_count": %s,\n' "$(printf '%s' "$CFST_RESULT_COUNT" | json_escape)"
     printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
     printf '  "proxy_service": %s,\n' "$(printf '%s' "$PROXY_SERVICE" | json_escape)"
     printf '  "best_ips": %s,\n' "$(printf '%s' "$best_ips" | json_escape)"
@@ -366,7 +372,7 @@ check_cloudflare_auth() {
 run_speedtest() {
   rm -f "$RESULT_FILE"
   local args
-  args="-tp $CFST_PORT -t $CFST_TIMEOUT -n $CFST_THREADS -dn $CFST_COUNT -p $CFST_COUNT -tl $CFST_MAX_LATENCY -tll $CFST_MIN_LATENCY -sl $CFST_MIN_SPEED -dt $CFST_DOWNLOAD_TIMEOUT -f $IP_FILE -o $RESULT_FILE"
+  args="-tp $CFST_PORT -t $CFST_TIMEOUT -n $CFST_THREADS -dn $CFST_DOWNLOAD_COUNT -p $CFST_RESULT_COUNT -tl $CFST_MAX_LATENCY -tll $CFST_MIN_LATENCY -sl $CFST_MIN_SPEED -dt $CFST_DOWNLOAD_TIMEOUT -f $IP_FILE -o $RESULT_FILE"
   if [ -n "$CFST_URL" ]; then
     args="$args -url $CFST_URL"
     log "测速：已开启下载测速，地址 $CFST_URL"
@@ -375,7 +381,7 @@ run_speedtest() {
     log "测速：未开启下载测速，仅做延迟优选"
   fi
 
-  log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，显示数量 $CFST_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
+  log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，下载测速数量 $CFST_DOWNLOAD_COUNT，显示数量 $CFST_RESULT_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
   log "测速：下面显示 cfst 实时进度和速度；主日志只记录关键步骤，避免进度刷屏"
   local cfst_raw_log="$CFST_RAW_LOG"
   : > "$cfst_raw_log"
@@ -402,12 +408,12 @@ run_speedtest() {
 }
 
 show_best_ips() {
-  log "优选结果：前 $CFST_COUNT 个 IP"
-  awk -F, 'NR==1 {next} NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); printf "%d. %s  延迟:%s  速度:%s\n", NR-1, $1, $5, $6}' "$RESULT_FILE" | head -n "$CFST_COUNT" | tee -a "$LOG_FILE" "$INFORM_LOG"
+  log "优选结果：前 $CFST_RESULT_COUNT 个 IP"
+  awk -F, 'NR==1 {next} NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); printf "%d. %s  延迟:%s  速度:%s\n", NR-1, $1, $5, $6}' "$RESULT_FILE" | head -n "$CFST_RESULT_COUNT" | tee -a "$LOG_FILE" "$INFORM_LOG"
 }
 
 best_ip_list() {
-  awk -F, 'NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); print $1}' "$RESULT_FILE" | head -n "$CFST_COUNT"
+  awk -F, 'NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); print $1}' "$RESULT_FILE" | head -n "$CFST_RESULT_COUNT"
 }
 
 record_type_for_ip() {
