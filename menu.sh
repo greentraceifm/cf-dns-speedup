@@ -111,7 +111,7 @@ print_status() {
     echo "- PushPlus：未配置"
   fi
   echo "- DRY_RUN：$(get_value DRY_RUN)"
-  echo "- 测速线程/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_COUNT)"
+  echo "- 测速线程/下载测速数量/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_DOWNLOAD_COUNT)/$(get_value CFST_RESULT_COUNT)"
 }
 
 configure_cloudflare() {
@@ -184,21 +184,29 @@ configure_threads() {
   read -r threads
   [ -n "$threads" ] || threads=32
   set_raw CFST_THREADS "$threads"
-  printf "请输入测试并显示的 IP 数量（默认 5）: "
+  printf "请输入旧版兼容显示数量 CFST_COUNT（默认 5）: "
   read -r count
   [ -n "$count" ] || count=5
   set_raw CFST_COUNT "$count"
-  printf "请输入 cfst 总超时秒数（默认 900，防止卡死）: "
+  printf "请输入参与下载测速的候选 IP 数量 CFST_DOWNLOAD_COUNT（4K 推荐 100，均衡推荐 50）: "
+  read -r download_count
+  [ -n "$download_count" ] || download_count=100
+  set_raw CFST_DOWNLOAD_COUNT "$download_count"
+  printf "请输入最终显示/更新 DNS 的 IP 数量 CFST_RESULT_COUNT（默认 5）: "
+  read -r result_count
+  [ -n "$result_count" ] || result_count=5
+  set_raw CFST_RESULT_COUNT "$result_count"
+  printf "请输入 cfst 总超时秒数（dn=100 推荐 3600；20MB 推荐 4200）: "
   read -r total_timeout
-  [ -n "$total_timeout" ] || total_timeout=900
+  [ -n "$total_timeout" ] || total_timeout=3600
   set_raw CFST_TOTAL_TIMEOUT "$total_timeout"
   printf "请输入单个 IP 延迟测试超时秒数（默认 4）: "
   read -r timeout
   [ -n "$timeout" ] || timeout=4
   set_raw CFST_TIMEOUT "$timeout"
-  printf "请输入下载测速超时秒数（默认 15；测速为 0 可试 20）: "
+  printf "请输入下载测速超时秒数（dn=100 推荐 25；20MB 推荐 30）: "
   read -r download_timeout
-  [ -n "$download_timeout" ] || download_timeout=15
+  [ -n "$download_timeout" ] || download_timeout=25
   set_raw CFST_DOWNLOAD_TIMEOUT "$download_timeout"
   printf "请输入平均延迟下限 ms（默认 0，一般不用过滤）: "
   read -r min_latency
