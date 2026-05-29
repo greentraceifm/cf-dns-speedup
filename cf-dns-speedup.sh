@@ -380,6 +380,10 @@ check_cloudflare_auth() {
 
 run_speedtest() {
   local current max_count step qualified
+  local best_result_file="$APP_DIR/result.best.csv"
+  local best_qualified=-1
+  local best_download_count="$CFST_DOWNLOAD_COUNT"
+  rm -f "$best_result_file"
   current="$CFST_DOWNLOAD_COUNT"
   max_count="$CFST_DOWNLOAD_COUNT_MAX"
   step="$CFST_DOWNLOAD_COUNT_STEP"
@@ -389,6 +393,11 @@ run_speedtest() {
   while true; do
     run_cfst_once "$current"
     qualified="$(preferred_result_count)"
+    if [ "$qualified" -gt "$best_qualified" ]; then
+      cp "$RESULT_FILE" "$best_result_file"
+      best_qualified="$qualified"
+      best_download_count="$current"
+    fi
     if [ "${CFST_PREFER_MIN_SPEED:-0}" != "0" ]; then
       log "测速：速度不低于 ${CFST_PREFER_MIN_SPEED} MB/s 的候选数量：$qualified/$CFST_RESULT_COUNT"
     fi
@@ -407,6 +416,12 @@ run_speedtest() {
     log "测速：高吞吐候选不足，扩大下载测速数量：$current -> $next"
     current="$next"
   done
+
+  if [ -s "$best_result_file" ] && [ "$best_download_count" != "$CFST_DOWNLOAD_COUNT" ]; then
+    cp "$best_result_file" "$RESULT_FILE"
+    CFST_DOWNLOAD_COUNT="$best_download_count"
+    log "测速：采用高吞吐候选最多的一轮结果，下载测速数量 $best_download_count，达标候选 $best_qualified/$CFST_RESULT_COUNT"
+  fi
 }
 
 run_cfst_once() {
