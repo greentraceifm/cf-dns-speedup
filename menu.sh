@@ -112,6 +112,7 @@ print_status() {
   fi
   echo "- DRY_RUN：$(get_value DRY_RUN)"
   echo "- 测速线程/下载测速数量/显示数量：$(get_value CFST_THREADS)/$(get_value CFST_DOWNLOAD_COUNT)/$(get_value CFST_RESULT_COUNT)"
+  echo "- 高吞吐软门槛/递增步长/最大测速数量：$(get_value CFST_PREFER_MIN_SPEED)/$(get_value CFST_DOWNLOAD_COUNT_STEP)/$(get_value CFST_DOWNLOAD_COUNT_MAX)"
 }
 
 configure_cloudflare() {
@@ -192,6 +193,14 @@ configure_threads() {
   read -r download_count
   [ -n "$download_count" ] || download_count=100
   set_raw CFST_DOWNLOAD_COUNT "$download_count"
+  printf "请输入高吞吐候选不足时的递增步长 CFST_DOWNLOAD_COUNT_STEP（推荐 50；0 表示不递增）: "
+  read -r download_step
+  [ -n "$download_step" ] || download_step=50
+  set_raw CFST_DOWNLOAD_COUNT_STEP "$download_step"
+  printf "请输入最大下载测速候选数量 CFST_DOWNLOAD_COUNT_MAX（推荐 200）: "
+  read -r download_max
+  [ -n "$download_max" ] || download_max=200
+  set_raw CFST_DOWNLOAD_COUNT_MAX "$download_max"
   printf "请输入最终显示/更新 DNS 的 IP 数量 CFST_RESULT_COUNT（默认 5）: "
   read -r result_count
   [ -n "$result_count" ] || result_count=5
@@ -220,6 +229,10 @@ configure_threads() {
   read -r min_speed
   [ -n "$min_speed" ] || min_speed=0
   set_raw CFST_MIN_SPEED "$min_speed"
+  printf "请输入高吞吐优先软门槛 MB/s（推荐 10；0 表示关闭软门槛）: "
+  read -r prefer_min_speed
+  [ -n "$prefer_min_speed" ] || prefer_min_speed=10
+  set_raw CFST_PREFER_MIN_SPEED "$prefer_min_speed"
   echo "测速参数已保存。"
 }
 

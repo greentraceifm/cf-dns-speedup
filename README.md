@@ -173,10 +173,12 @@ cfst 总超时：3600
 
 - 延迟下限保持 `0` 即可，一般不需要过滤低延迟。
 - `CFST_DOWNLOAD_COUNT` 控制参与下载测速的候选数量，`CFST_RESULT_COUNT` 控制最终显示和更新 DNS 的数量。
+- `CFST_PREFER_MIN_SPEED` 是软高吞吐门槛：达到门槛的 IP 会优先进入最终结果；数量不足时会用次优结果补齐，避免域名缺少 IP。
+- `CFST_DOWNLOAD_COUNT_STEP` 和 `CFST_DOWNLOAD_COUNT_MAX` 用于自适应扩大测速范围：高吞吐候选不足时，按步长增加下载测速候选数量，直到满足最终数量或达到上限。
 - 面向 4K 视频吞吐的每日清晨任务建议先使用 `CFST_DOWNLOAD_COUNT=100`、`CFST_RESULT_COUNT=5`，扩大下载测速候选池。
 - 面向 4K 视频吞吐优先，延迟上限建议 `220`；如果更重视网页交互手感，可临时测试 `150` 或 `200`。
 - 如果 `100` 个候选配合 10MB 文件仍不稳定，再把测速 URL 切到 `20mb.bin`，并把 `CFST_TOTAL_TIMEOUT` 提高到 `4200`、`CFST_DOWNLOAD_TIMEOUT` 提高到 `30`。
-- 下载速度下限首次保持 `0`，确认测速稳定后可改为 `1`。
+- 下载速度硬下限 `CFST_MIN_SPEED` 建议保持 `0`；如果想优先筛高吞吐，优先使用 `CFST_PREFER_MIN_SPEED=10` 这种软门槛。
 - 如果只想做延迟排序，可关闭下载测速，让 `CFST_URL` 留空。
 
 ## 定时任务

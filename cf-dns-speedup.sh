@@ -68,11 +68,14 @@ load_config() {
   CFST_THREADS="${CFST_THREADS:-32}"
   CFST_COUNT="${CFST_COUNT:-5}"
   CFST_DOWNLOAD_COUNT="${CFST_DOWNLOAD_COUNT:-$CFST_COUNT}"
+  CFST_DOWNLOAD_COUNT_STEP="${CFST_DOWNLOAD_COUNT_STEP:-0}"
+  CFST_DOWNLOAD_COUNT_MAX="${CFST_DOWNLOAD_COUNT_MAX:-$CFST_DOWNLOAD_COUNT}"
   CFST_RESULT_COUNT="${CFST_RESULT_COUNT:-$CFST_COUNT}"
   CFST_TIMEOUT="${CFST_TIMEOUT:-4}"
   CFST_TOTAL_TIMEOUT="${CFST_TOTAL_TIMEOUT:-900}"
   CFST_DOWNLOAD_TIMEOUT="${CFST_DOWNLOAD_TIMEOUT:-8}"
   CFST_MIN_SPEED="${CFST_MIN_SPEED:-0}"
+  CFST_PREFER_MIN_SPEED="${CFST_PREFER_MIN_SPEED:-0}"
   CFST_MAX_LATENCY="${CFST_MAX_LATENCY:-9999}"
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
@@ -153,7 +156,7 @@ write_run_summary() {
   RUN_FINISHED_AT="$(date '+%F %T')"
   local best_ips=""
   if [ -s "$RESULT_FILE" ]; then
-    best_ips="$(awk -F, -v limit="$CFST_RESULT_COUNT" 'NR>1 && $1 != "" && count < limit {gsub(/[[:space:]]/, "", $1); if (out != "") out = out " "; out = out $1; count++} END {print out}' "$RESULT_FILE")"
+    best_ips="$(best_ip_list | awk '{if (out != "") out = out " "; out = out $1} END {print out}')"
   fi
 
   {
@@ -164,7 +167,10 @@ write_run_summary() {
     echo "domain_update_mode=$DOMAIN_UPDATE_MODE"
     echo "cdn_ip_mode=$CDN_IP_MODE"
     echo "cfst_download_count=$CFST_DOWNLOAD_COUNT"
+    echo "cfst_download_count_step=$CFST_DOWNLOAD_COUNT_STEP"
+    echo "cfst_download_count_max=$CFST_DOWNLOAD_COUNT_MAX"
     echo "cfst_result_count=$CFST_RESULT_COUNT"
+    echo "cfst_prefer_min_speed=$CFST_PREFER_MIN_SPEED"
     echo "dry_run=$DRY_RUN"
     echo "proxy_service=$PROXY_SERVICE"
     echo "best_ips=$best_ips"
@@ -180,7 +186,10 @@ write_run_summary() {
     printf '  "domain_update_mode": %s,\n' "$(printf '%s' "$DOMAIN_UPDATE_MODE" | json_escape)"
     printf '  "cdn_ip_mode": %s,\n' "$(printf '%s' "$CDN_IP_MODE" | json_escape)"
     printf '  "cfst_download_count": %s,\n' "$(printf '%s' "$CFST_DOWNLOAD_COUNT" | json_escape)"
+    printf '  "cfst_download_count_step": %s,\n' "$(printf '%s' "$CFST_DOWNLOAD_COUNT_STEP" | json_escape)"
+    printf '  "cfst_download_count_max": %s,\n' "$(printf '%s' "$CFST_DOWNLOAD_COUNT_MAX" | json_escape)"
     printf '  "cfst_result_count": %s,\n' "$(printf '%s' "$CFST_RESULT_COUNT" | json_escape)"
+    printf '  "cfst_prefer_min_speed": %s,\n' "$(printf '%s' "$CFST_PREFER_MIN_SPEED" | json_escape)"
     printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
     printf '  "proxy_service": %s,\n' "$(printf '%s' "$PROXY_SERVICE" | json_escape)"
     printf '  "best_ips": %s,\n' "$(printf '%s' "$best_ips" | json_escape)"
@@ -370,9 +379,41 @@ check_cloudflare_auth() {
 }
 
 run_speedtest() {
+  local current max_count step qualified
+  current="$CFST_DOWNLOAD_COUNT"
+  max_count="$CFST_DOWNLOAD_COUNT_MAX"
+  step="$CFST_DOWNLOAD_COUNT_STEP"
+  [ "$max_count" -ge "$current" ] 2>/dev/null || max_count="$current"
+  [ "$step" -ge 0 ] 2>/dev/null || step=0
+
+  while true; do
+    run_cfst_once "$current"
+    qualified="$(preferred_result_count)"
+    if [ "${CFST_PREFER_MIN_SPEED:-0}" != "0" ]; then
+      log "测速：速度不低于 ${CFST_PREFER_MIN_SPEED} MB/s 的候选数量：$qualified/$CFST_RESULT_COUNT"
+    fi
+    if [ "${CFST_PREFER_MIN_SPEED:-0}" = "0" ] || [ "$qualified" -ge "$CFST_RESULT_COUNT" ]; then
+      CFST_DOWNLOAD_COUNT="$current"
+      break
+    fi
+    if [ "$step" -le 0 ] || [ "$current" -ge "$max_count" ]; then
+      log "测速：高吞吐候选不足 $CFST_RESULT_COUNT 个，已到当前上限 $current；将用最高速度结果补齐，避免域名缺少 IP"
+      CFST_DOWNLOAD_COUNT="$current"
+      break
+    fi
+    local next
+    next=$((current + step))
+    [ "$next" -le "$max_count" ] || next="$max_count"
+    log "测速：高吞吐候选不足，扩大下载测速数量：$current -> $next"
+    current="$next"
+  done
+}
+
+run_cfst_once() {
+  local download_count="$1"
   rm -f "$RESULT_FILE"
   local args
-  args="-tp $CFST_PORT -t $CFST_TIMEOUT -n $CFST_THREADS -dn $CFST_DOWNLOAD_COUNT -p $CFST_RESULT_COUNT -tl $CFST_MAX_LATENCY -tll $CFST_MIN_LATENCY -sl $CFST_MIN_SPEED -dt $CFST_DOWNLOAD_TIMEOUT -f $IP_FILE -o $RESULT_FILE"
+  args="-tp $CFST_PORT -t $CFST_TIMEOUT -n $CFST_THREADS -dn $download_count -p $download_count -tl $CFST_MAX_LATENCY -tll $CFST_MIN_LATENCY -sl $CFST_MIN_SPEED -dt $CFST_DOWNLOAD_TIMEOUT -f $IP_FILE -o $RESULT_FILE"
   if [ -n "$CFST_URL" ]; then
     args="$args -url $CFST_URL"
     log "测速：已开启下载测速，地址 $CFST_URL"
@@ -381,7 +422,7 @@ run_speedtest() {
     log "测速：未开启下载测速，仅做延迟优选"
   fi
 
-  log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，下载测速数量 $CFST_DOWNLOAD_COUNT，显示数量 $CFST_RESULT_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
+  log "测速：端口 $CFST_PORT，线程 $CFST_THREADS，下载测速数量 $download_count，显示数量 $CFST_RESULT_COUNT，总超时 ${CFST_TOTAL_TIMEOUT}s"
   log "测速：下面显示 cfst 实时进度和速度；主日志只记录关键步骤，避免进度刷屏"
   local cfst_raw_log="$CFST_RAW_LOG"
   : > "$cfst_raw_log"
@@ -407,13 +448,44 @@ run_speedtest() {
   log "测速：优选完成，最快 IP：$first_ip"
 }
 
+preferred_result_count() {
+  awk -F, -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" 'NR>1 && $1 != "" && ($6 + 0) >= min_speed {count++} END {print count + 0}' "$RESULT_FILE"
+}
+
+selected_result_rows() {
+  awk -F, -v limit="$CFST_RESULT_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
+    NR == 1 {next}
+    $1 != "" {
+      ip=$1
+      gsub(/[[:space:]]/, "", ip)
+      row=ip "\t" $5 "\t" $6
+      if (min_speed > 0 && ($6 + 0) >= min_speed) {
+        preferred[++preferred_count]=row
+      } else {
+        fallback[++fallback_count]=row
+      }
+    }
+    END {
+      count=0
+      for (i=1; i<=preferred_count && count<limit; i++) {
+        print preferred[i]
+        count++
+      }
+      for (i=1; i<=fallback_count && count<limit; i++) {
+        print fallback[i]
+        count++
+      }
+    }
+  ' "$RESULT_FILE"
+}
+
 show_best_ips() {
   log "优选结果：前 $CFST_RESULT_COUNT 个 IP"
-  awk -F, 'NR==1 {next} NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); printf "%d. %s  延迟:%s  速度:%s\n", NR-1, $1, $5, $6}' "$RESULT_FILE" | head -n "$CFST_RESULT_COUNT" | tee -a "$LOG_FILE" "$INFORM_LOG"
+  selected_result_rows | awk -F '\t' '{printf "%d. %s  延迟:%s  速度:%s\n", NR, $1, $2, $3}' | tee -a "$LOG_FILE" "$INFORM_LOG"
 }
 
 best_ip_list() {
-  awk -F, 'NR>1 && $1 != "" {gsub(/[[:space:]]/, "", $1); print $1}' "$RESULT_FILE" | head -n "$CFST_RESULT_COUNT"
+  selected_result_rows | awk -F '\t' '{print $1}'
 }
 
 record_type_for_ip() {
