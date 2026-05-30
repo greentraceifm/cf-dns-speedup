@@ -6,6 +6,7 @@ CONFIG_FILE="${CONFIG_FILE:-$APP_DIR/config.env}"
 CFST_BIN="${CFST_BIN:-$APP_DIR/cfst}"
 IP_FILE="${IP_FILE:-$APP_DIR/ip.txt}"
 RESULT_FILE="${RESULT_FILE:-$APP_DIR/result.csv}"
+STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
 LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
 CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
@@ -76,6 +77,10 @@ load_config() {
   CFST_DOWNLOAD_TIMEOUT="${CFST_DOWNLOAD_TIMEOUT:-8}"
   CFST_MIN_SPEED="${CFST_MIN_SPEED:-0}"
   CFST_PREFER_MIN_SPEED="${CFST_PREFER_MIN_SPEED:-0}"
+  CFST_STABILITY_TEST_COUNT="${CFST_STABILITY_TEST_COUNT:-0}"
+  CFST_STABILITY_TEST_ROUNDS="${CFST_STABILITY_TEST_ROUNDS:-0}"
+  CFST_STABILITY_CONNECT_TIMEOUT="${CFST_STABILITY_CONNECT_TIMEOUT:-6}"
+  CFST_STABILITY_TIMEOUT="${CFST_STABILITY_TIMEOUT:-35}"
   CFST_MAX_LATENCY="${CFST_MAX_LATENCY:-9999}"
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
@@ -171,6 +176,8 @@ write_run_summary() {
     echo "cfst_download_count_max=$CFST_DOWNLOAD_COUNT_MAX"
     echo "cfst_result_count=$CFST_RESULT_COUNT"
     echo "cfst_prefer_min_speed=$CFST_PREFER_MIN_SPEED"
+    echo "cfst_stability_test_count=$CFST_STABILITY_TEST_COUNT"
+    echo "cfst_stability_test_rounds=$CFST_STABILITY_TEST_ROUNDS"
     echo "dry_run=$DRY_RUN"
     echo "proxy_service=$PROXY_SERVICE"
     echo "best_ips=$best_ips"
@@ -190,6 +197,8 @@ write_run_summary() {
     printf '  "cfst_download_count_max": %s,\n' "$(printf '%s' "$CFST_DOWNLOAD_COUNT_MAX" | json_escape)"
     printf '  "cfst_result_count": %s,\n' "$(printf '%s' "$CFST_RESULT_COUNT" | json_escape)"
     printf '  "cfst_prefer_min_speed": %s,\n' "$(printf '%s' "$CFST_PREFER_MIN_SPEED" | json_escape)"
+    printf '  "cfst_stability_test_count": %s,\n' "$(printf '%s' "$CFST_STABILITY_TEST_COUNT" | json_escape)"
+    printf '  "cfst_stability_test_rounds": %s,\n' "$(printf '%s' "$CFST_STABILITY_TEST_ROUNDS" | json_escape)"
     printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
     printf '  "proxy_service": %s,\n' "$(printf '%s' "$PROXY_SERVICE" | json_escape)"
     printf '  "best_ips": %s,\n' "$(printf '%s' "$best_ips" | json_escape)"
@@ -422,6 +431,8 @@ run_speedtest() {
     CFST_DOWNLOAD_COUNT="$best_download_count"
     log "测速：采用高吞吐候选最多的一轮结果，下载测速数量 $best_download_count，达标候选 $best_qualified/$CFST_RESULT_COUNT"
   fi
+
+  run_stability_retest
 }
 
 run_cfst_once() {
@@ -467,7 +478,136 @@ preferred_result_count() {
   awk -F, -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" 'NR>1 && $1 != "" && ($6 + 0) >= min_speed {count++} END {print count + 0}' "$RESULT_FILE"
 }
 
+cfst_url_host() {
+  printf '%s\n' "$CFST_URL" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#/.*##' -e 's#^\[\(.*\)\]$#\1#' -e 's#:[0-9][0-9]*$##'
+}
+
+run_stability_retest() {
+  rm -f "$STABILITY_RESULT_FILE"
+  [ "${CFST_STABILITY_TEST_COUNT:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ "${CFST_STABILITY_TEST_ROUNDS:-0}" -gt 0 ] 2>/dev/null || return 0
+  [ -n "$CFST_URL" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+
+  local host
+  host="$(cfst_url_host)"
+  [ -n "$host" ] || return 0
+
+  local candidate_file raw_file sorted_file
+  candidate_file="$APP_DIR/stability-candidates.tsv"
+  raw_file="$APP_DIR/stability-raw.tsv"
+  sorted_file="$APP_DIR/stability-sorted.tsv"
+  rm -f "$candidate_file" "$raw_file" "$sorted_file"
+
+  awk -F, -v limit="$CFST_STABILITY_TEST_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
+    NR == 1 {next}
+    $1 != "" {
+      ip=$1
+      gsub(/[[:space:]]/, "", ip)
+      row=ip "\t" $5 "\t" $6
+      if (min_speed > 0 && ($6 + 0) >= min_speed) {
+        preferred[++preferred_count]=row
+      } else {
+        fallback[++fallback_count]=row
+      }
+    }
+    END {
+      count=0
+      for (i=1; i<=preferred_count && count<limit; i++) {
+        print preferred[i]
+        count++
+      }
+      for (i=1; i<=fallback_count && count<limit; i++) {
+        print fallback[i]
+        count++
+      }
+    }
+  ' "$RESULT_FILE" > "$candidate_file"
+  [ -s "$candidate_file" ] || return 0
+
+  log "稳定性复测：对前 $(wc -l < "$candidate_file" | tr -d ' ') 个候选做 ${CFST_STABILITY_TEST_ROUNDS} 轮真实下载，地址 $CFST_URL"
+  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$STABILITY_RESULT_FILE"
+
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed; do
+    [ -n "$ip" ] || continue
+    local round ok speed_bps
+    round=1
+    ok=0
+    : > "$raw_file"
+    while [ "$round" -le "$CFST_STABILITY_TEST_ROUNDS" ]; do
+      speed_bps="$(curl -L -k -o /dev/null \
+        --connect-timeout "$CFST_STABILITY_CONNECT_TIMEOUT" \
+        --max-time "$CFST_STABILITY_TIMEOUT" \
+        --resolve "$host:$CFST_PORT:$ip" \
+        -w '%{http_code} %{size_download} %{speed_download}' \
+        "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}')"
+      if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
+        awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
+        ok=$((ok + 1))
+      else
+        printf '0.00\n' >> "$raw_file"
+      fi
+      round=$((round + 1))
+    done
+
+    awk -v ip="$ip" -v latency="$latency" -v cfst_speed="$cfst_speed" -v ok="$ok" '
+      BEGIN {min = ""; sum = 0; count = 0}
+      {
+        speed = $1 + 0
+        if (min == "" || speed < min) min = speed
+        sum += speed
+        count++
+      }
+      END {
+        avg = count > 0 ? sum / count : 0
+        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\n", ip, latency, cfst_speed, min + 0, avg, ok
+      }
+    ' "$raw_file" >> "$sorted_file"
+  done < "$candidate_file"
+
+  if [ -s "$sorted_file" ]; then
+    {
+      printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n'
+      awk -F '\t' '
+        {
+          line[NR]=$0
+          min_speed[NR]=$4 + 0
+          avg_speed[NR]=$5 + 0
+        }
+        END {
+          for (i=1; i<=NR; i++) {
+            best=i
+            for (j=i+1; j<=NR; j++) {
+              if (min_speed[j] > min_speed[best] || (min_speed[j] == min_speed[best] && avg_speed[j] > avg_speed[best])) {
+                best=j
+              }
+            }
+            if (best != i) {
+              tmp=line[i]; line[i]=line[best]; line[best]=tmp
+              tmp=min_speed[i]; min_speed[i]=min_speed[best]; min_speed[best]=tmp
+              tmp=avg_speed[i]; avg_speed[i]=avg_speed[best]; avg_speed[best]=tmp
+            }
+            print line[i]
+          }
+        }
+      ' "$sorted_file"
+    } > "$STABILITY_RESULT_FILE"
+    log "稳定性复测：完成，按最低速度优先、平均速度次之重新排序"
+  fi
+}
+
 selected_result_rows() {
+  if [ -s "$STABILITY_RESULT_FILE" ]; then
+    awk -F '\t' -v limit="$CFST_RESULT_COUNT" '
+      NR == 1 {next}
+      $1 != "" && count < limit {
+        print $1 "\t" $2 "\t" $4
+        count++
+      }
+    ' "$STABILITY_RESULT_FILE"
+    return 0
+  fi
+
   awk -F, -v limit="$CFST_RESULT_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
     NR == 1 {next}
     $1 != "" {
@@ -781,6 +921,28 @@ delete_records_command() {
   delete_dns_records_by_name "$name"
 }
 
+stability_update_command() {
+  acquire_lock
+  rotate_logs
+  RUN_STARTED_AT="$(date '+%F %T')"
+  RUN_STATUS="running"
+  RUN_ERROR=""
+  : > "$INFORM_LOG"
+  [ -s "$RESULT_FILE" ] || die "result.csv 不存在，无法只执行稳定性复测"
+  log "------------------------------------------------------------"
+  log "稳定性复测更新：复用现有 result.csv，不重新执行 cfst 粗筛"
+  stop_proxy_if_needed
+  run_stability_retest
+  restart_proxy_if_needed
+  [ -s "$STABILITY_RESULT_FILE" ] || die "稳定性复测未生成结果"
+  show_best_ips
+  identify_reverse_ip_regions
+  update_cloudflare
+  send_notifications
+  RUN_STATUS="success"
+  log "稳定性复测更新完成"
+}
+
 main() {
   load_config
   need_cmd curl
@@ -792,6 +954,7 @@ main() {
 
   case "${1:-run}" in
     run) run_once ;;
+    stability-update) stability_update_command ;;
     delete-records) delete_records_command ;;
     *) die "未知命令：$1" ;;
   esac

@@ -23,14 +23,35 @@ Council recommendation:
 CFST_PREFER_MIN_SPEED=10
 CFST_DOWNLOAD_COUNT_STEP=50
 CFST_DOWNLOAD_COUNT_MAX=200
+CFST_STABILITY_TEST_COUNT=12
+CFST_STABILITY_TEST_ROUNDS=2
 ```
 
 These are intentionally separate from `CFST_MIN_SPEED`.
 
 - `CFST_MIN_SPEED` is the hard `cfst` speed filter. Keep it at `0` for production safety.
 - `CFST_PREFER_MIN_SPEED` is a soft ranking preference. Matching IPs are selected first; non-matching IPs are used only to fill the final result count.
+- `CFST_STABILITY_TEST_COUNT` and `CFST_STABILITY_TEST_ROUNDS` add a final real-download retest for the top candidates. The retest uses `curl --resolve` against `CFST_URL`, then ranks candidates by worst-round speed first and average speed second. This favors video stability over one-time peak throughput.
 
 ## Production Profile
+
+Routine daily cron should prefer bounded downtime:
+
+```text
+CFST_DOWNLOAD_COUNT=100
+CFST_DOWNLOAD_COUNT_STEP=0
+CFST_DOWNLOAD_COUNT_MAX=100
+CFST_RESULT_COUNT=5
+CFST_PREFER_MIN_SPEED=10
+CFST_TOTAL_TIMEOUT=4200
+CFST_DOWNLOAD_TIMEOUT=30
+CFST_MAX_LATENCY=220
+CFST_URL=https://greentrace-speedtest.pages.dev/20mb.bin
+CFST_STABILITY_TEST_COUNT=12
+CFST_STABILITY_TEST_ROUNDS=2
+```
+
+Manual adaptive sweep profile:
 
 ```text
 CFST_DOWNLOAD_COUNT=100
@@ -42,10 +63,14 @@ CFST_TOTAL_TIMEOUT=4200
 CFST_DOWNLOAD_TIMEOUT=30
 CFST_MAX_LATENCY=220
 CFST_URL=https://greentrace-speedtest.pages.dev/20mb.bin
+CFST_STABILITY_TEST_COUNT=12
+CFST_STABILITY_TEST_ROUNDS=2
 ```
 
 ## Operational Notes
 
 - This can run longer than the previous Stage 2 profile if the first 100 candidates do not produce five IPs above `10 MB/s`.
+- Stability retest adds up to `CFST_STABILITY_TEST_COUNT * CFST_STABILITY_TEST_ROUNDS` extra 20MB downloads. Keep the retest count small enough for the router and WAN link.
+- The 2026-05-30 production run expanded to 200 candidates but selected the 100-candidate run as best, while keeping PassWall stopped for about 73 minutes. Use the 200-candidate sweep manually, not as the default daily cron profile.
 - PassWall remains stopped during the speed-test phase, so keep the cron schedule outside normal use windows.
 - The 15:30 cron entry should be removed or disabled unless an afternoon retest is explicitly wanted.
