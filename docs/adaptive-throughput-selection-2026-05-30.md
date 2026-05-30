@@ -25,6 +25,7 @@ CFST_DOWNLOAD_COUNT_STEP=50
 CFST_DOWNLOAD_COUNT_MAX=200
 CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
+VALIDATE_CURRENT_ROUNDS=2
 ```
 
 These are intentionally separate from `CFST_MIN_SPEED`.
@@ -32,6 +33,7 @@ These are intentionally separate from `CFST_MIN_SPEED`.
 - `CFST_MIN_SPEED` is the hard `cfst` speed filter. Keep it at `0` for production safety.
 - `CFST_PREFER_MIN_SPEED` is a soft ranking preference. Matching IPs are selected first; non-matching IPs are used only to fill the final result count.
 - `CFST_STABILITY_TEST_COUNT` and `CFST_STABILITY_TEST_ROUNDS` add a final real-download retest for the top candidates. The retest uses `curl --resolve` against `CFST_URL`, then ranks candidates by worst-round speed first and average speed second. This favors video stability over one-time peak throughput.
+- `VALIDATE_CURRENT_ROUNDS` controls read-only `validate-current` checks. It does not update DNS and does not stop PassWall.
 
 ## Production Profile
 
@@ -49,6 +51,7 @@ CFST_MAX_LATENCY=220
 CFST_URL=https://greentrace-speedtest.pages.dev/20mb.bin
 CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
+VALIDATE_CURRENT_ROUNDS=2
 ```
 
 Manual adaptive sweep profile:

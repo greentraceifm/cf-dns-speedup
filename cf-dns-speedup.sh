@@ -7,6 +7,8 @@ CFST_BIN="${CFST_BIN:-$APP_DIR/cfst}"
 IP_FILE="${IP_FILE:-$APP_DIR/ip.txt}"
 RESULT_FILE="${RESULT_FILE:-$APP_DIR/result.csv}"
 STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
+HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
+VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
 CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
@@ -81,6 +83,7 @@ load_config() {
   CFST_STABILITY_TEST_ROUNDS="${CFST_STABILITY_TEST_ROUNDS:-0}"
   CFST_STABILITY_CONNECT_TIMEOUT="${CFST_STABILITY_CONNECT_TIMEOUT:-6}"
   CFST_STABILITY_TIMEOUT="${CFST_STABILITY_TIMEOUT:-35}"
+  VALIDATE_CURRENT_ROUNDS="${VALIDATE_CURRENT_ROUNDS:-2}"
   CFST_MAX_LATENCY="${CFST_MAX_LATENCY:-9999}"
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
@@ -157,12 +160,19 @@ json_escape() {
   jq -Rsa . 2>/dev/null || sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$/"/'
 }
 
+file_mtime() {
+  [ -f "$1" ] || return 0
+  date -r "$1" '+%F %T' 2>/dev/null || stat -c '%y' "$1" 2>/dev/null | cut -d. -f1 || true
+}
+
 write_run_summary() {
   RUN_FINISHED_AT="$(date '+%F %T')"
   local best_ips=""
+  local stability_updated_at=""
   if [ -s "$RESULT_FILE" ]; then
     best_ips="$(best_ip_list | awk '{if (out != "") out = out " "; out = out $1} END {print out}')"
   fi
+  stability_updated_at="$(file_mtime "$STABILITY_RESULT_FILE")"
 
   {
     echo "status=$RUN_STATUS"
@@ -178,6 +188,8 @@ write_run_summary() {
     echo "cfst_prefer_min_speed=$CFST_PREFER_MIN_SPEED"
     echo "cfst_stability_test_count=$CFST_STABILITY_TEST_COUNT"
     echo "cfst_stability_test_rounds=$CFST_STABILITY_TEST_ROUNDS"
+    echo "stability_result_file=$STABILITY_RESULT_FILE"
+    echo "stability_result_updated_at=$stability_updated_at"
     echo "dry_run=$DRY_RUN"
     echo "proxy_service=$PROXY_SERVICE"
     echo "best_ips=$best_ips"
@@ -199,6 +211,8 @@ write_run_summary() {
     printf '  "cfst_prefer_min_speed": %s,\n' "$(printf '%s' "$CFST_PREFER_MIN_SPEED" | json_escape)"
     printf '  "cfst_stability_test_count": %s,\n' "$(printf '%s' "$CFST_STABILITY_TEST_COUNT" | json_escape)"
     printf '  "cfst_stability_test_rounds": %s,\n' "$(printf '%s' "$CFST_STABILITY_TEST_ROUNDS" | json_escape)"
+    printf '  "stability_result_file": %s,\n' "$(printf '%s' "$STABILITY_RESULT_FILE" | json_escape)"
+    printf '  "stability_result_updated_at": %s,\n' "$(printf '%s' "$stability_updated_at" | json_escape)"
     printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
     printf '  "proxy_service": %s,\n' "$(printf '%s' "$PROXY_SERVICE" | json_escape)"
     printf '  "best_ips": %s,\n' "$(printf '%s' "$best_ips" | json_escape)"
@@ -392,7 +406,7 @@ run_speedtest() {
   local best_result_file="$APP_DIR/result.best.csv"
   local best_qualified=-1
   local best_download_count="$CFST_DOWNLOAD_COUNT"
-  rm -f "$best_result_file"
+  rm -f "$best_result_file" "$STABILITY_RESULT_FILE"
   current="$CFST_DOWNLOAD_COUNT"
   max_count="$CFST_DOWNLOAD_COUNT_MAX"
   step="$CFST_DOWNLOAD_COUNT_STEP"
@@ -921,6 +935,138 @@ delete_records_command() {
   delete_dns_records_by_name "$name"
 }
 
+print_service_health() {
+  /etc/init.d/passwall enabled >/dev/null 2>&1 && echo "passwall_enabled=yes" || echo "passwall_enabled=no"
+  /etc/init.d/smartdns status 2>/dev/null || true
+  /etc/init.d/dnsmasq status 2>/dev/null || true
+  /etc/init.d/firewall status 2>/dev/null || true
+}
+
+print_dns_health() {
+  [ -n "$CF_RECORD_NAMES" ] || return 0
+  for name in $CF_RECORD_NAMES; do
+    if command -v nslookup >/dev/null 2>&1; then
+      nslookup "$name" 127.0.0.1 2>/dev/null | awk -v name="$name" '
+        /^Address [0-9]+: / && $3 !~ /^(127\.|::1)/ {ip=$3}
+        /^Address: / && $2 !~ /^(127\.|::1)/ {ip=$2}
+        END {if (ip != "") print name " router_dns " ip; else print name " router_dns unresolved"}
+      '
+    fi
+    if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_ZONE_ID" ] && command -v jq >/dev/null 2>&1; then
+      local api response
+      api="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name"
+      response="$(cf_api GET "$api" 2>/dev/null || true)"
+      if echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
+        echo "$response" | jq -r --arg name "$name" '.result[0] | "\($name) cloudflare_api \(.content // "missing") ttl=\(.ttl // "n/a") proxied=\(.proxied | tostring)"'
+      else
+        echo "$name cloudflare_api unavailable"
+      fi
+    fi
+  done
+}
+
+health_check_command() {
+  mkdir -p "$APP_DIR"
+  {
+    echo "=== health-check ==="
+    date
+    echo
+    echo "=== config ==="
+    printf 'PUSH_MODE=%s\n' "$PUSH_MODE"
+    printf 'DOMAIN_UPDATE_MODE=%s\n' "$DOMAIN_UPDATE_MODE"
+    printf 'CFST_DOWNLOAD_COUNT=%s\n' "$CFST_DOWNLOAD_COUNT"
+    printf 'CFST_DOWNLOAD_COUNT_STEP=%s\n' "$CFST_DOWNLOAD_COUNT_STEP"
+    printf 'CFST_DOWNLOAD_COUNT_MAX=%s\n' "$CFST_DOWNLOAD_COUNT_MAX"
+    printf 'CFST_RESULT_COUNT=%s\n' "$CFST_RESULT_COUNT"
+    printf 'CFST_PREFER_MIN_SPEED=%s\n' "$CFST_PREFER_MIN_SPEED"
+    printf 'CFST_STABILITY_TEST_COUNT=%s\n' "$CFST_STABILITY_TEST_COUNT"
+    printf 'CFST_STABILITY_TEST_ROUNDS=%s\n' "$CFST_STABILITY_TEST_ROUNDS"
+    printf 'CFST_URL=%s\n' "$CFST_URL"
+    printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
+    printf 'DRY_RUN=%s\n' "$DRY_RUN"
+    echo
+    echo "=== files ==="
+    ls -l "$RESULT_FILE" "$STABILITY_RESULT_FILE" "$LAST_RUN_SUMMARY" 2>/dev/null || true
+    echo
+    echo "=== selected ==="
+    selected_result_rows 2>/dev/null | head -n "$CFST_RESULT_COUNT" || true
+    echo
+    echo "=== stability ==="
+    cat "$STABILITY_RESULT_FILE" 2>/dev/null || true
+    echo
+    echo "=== summary ==="
+    cat "$LAST_RUN_SUMMARY" 2>/dev/null || true
+    echo
+    echo "=== lock ==="
+    ls -ld "$LOCK_DIR" 2>/dev/null || echo "no_lock"
+    [ -f "$LOCK_DIR/pid" ] && cat "$LOCK_DIR/pid" 2>/dev/null || true
+    echo
+    echo "=== cron ==="
+    crontab -l 2>/dev/null | grep -n 'cf-dns-speedup\|DISABLED_BY_CODEX' || true
+    echo
+    echo "=== dns ==="
+    print_dns_health
+    echo
+    echo "=== services ==="
+    print_service_health
+  } | tee "$HEALTH_REPORT_FILE"
+}
+
+validate_current_command() {
+  acquire_lock
+
+  [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot validate current IPs"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  local host
+  host="$(cfst_url_host)"
+  [ -n "$host" ] || die "cannot parse host from CFST_URL"
+
+  local candidates
+  candidates="$APP_DIR/validate-current.candidates.tsv"
+  selected_result_rows | head -n "$CFST_RESULT_COUNT" > "$candidates"
+  [ -s "$candidates" ] || die "no selected IPs to validate"
+
+  printf 'ip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$VALIDATE_RESULT_FILE"
+  while IFS="$(printf '\t')" read -r ip latency previous_speed; do
+    [ -n "$ip" ] || continue
+    local round ok raw_file speed_bps
+    raw_file="$APP_DIR/validate-current.raw"
+    : > "$raw_file"
+    round=1
+    ok=0
+    while [ "$round" -le "$VALIDATE_CURRENT_ROUNDS" ]; do
+      speed_bps="$(curl -L -k -o /dev/null \
+        --connect-timeout "$CFST_STABILITY_CONNECT_TIMEOUT" \
+        --max-time "$CFST_STABILITY_TIMEOUT" \
+        --resolve "$host:$CFST_PORT:$ip" \
+        -w '%{http_code} %{size_download} %{speed_download}' \
+        "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}')"
+      if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
+        awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
+        ok=$((ok + 1))
+      else
+        printf '0.00\n' >> "$raw_file"
+      fi
+      round=$((round + 1))
+    done
+    awk -v ip="$ip" -v latency="$latency" -v previous_speed="$previous_speed" -v ok="$ok" '
+      BEGIN {min = ""; sum = 0; count = 0}
+      {
+        speed = $1 + 0
+        if (min == "" || speed < min) min = speed
+        sum += speed
+        count++
+      }
+      END {
+        avg = count > 0 ? sum / count : 0
+        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\n", ip, latency, previous_speed, min + 0, avg, ok
+      }
+    ' "$raw_file" >> "$VALIDATE_RESULT_FILE"
+  done < "$candidates"
+
+  cat "$VALIDATE_RESULT_FILE"
+}
+
 stability_update_command() {
   acquire_lock
   rotate_logs
@@ -954,6 +1100,8 @@ main() {
 
   case "${1:-run}" in
     run) run_once ;;
+    health-check) health_check_command ;;
+    validate-current) validate_current_command ;;
     stability-update) stability_update_command ;;
     delete-records) delete_records_command ;;
     *) die "未知命令：$1" ;;

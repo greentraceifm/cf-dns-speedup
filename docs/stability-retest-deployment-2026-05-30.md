@@ -45,6 +45,7 @@ CFST_PREFER_MIN_SPEED=10
 CFST_URL=https://greentrace-speedtest.pages.dev/20mb.bin
 CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
+VALIDATE_CURRENT_ROUNDS=2
 CFST_TOTAL_TIMEOUT=4200
 CFST_DOWNLOAD_TIMEOUT=30
 CFST_MAX_LATENCY=220
@@ -93,3 +94,17 @@ Router backups:
 ```
 
 To rollback script/config on OpenWrt, restore from the relevant backup directory and rerun the script in a maintenance window.
+
+## Read-Only Operations
+
+The script also supports read-only operational checks:
+
+```sh
+cd /root/cf-dns-speedup
+bash ./cf-dns-speedup.sh health-check
+bash ./cf-dns-speedup.sh validate-current
+```
+
+- `health-check` writes `/root/cf-dns-speedup/health-check.latest.txt` and checks config, selected IPs, DNS, cron, lock, and service state.
+- `validate-current` writes `/root/cf-dns-speedup/validate-current.latest.tsv` and retests the currently selected five IPs with real 20MB downloads.
+- Neither command updates Cloudflare DNS. `validate-current` also does not stop or restart PassWall.
