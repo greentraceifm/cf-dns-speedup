@@ -10,6 +10,9 @@ STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
+EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
+EXTERNAL_CANDIDATE_REPORT_FILE="${EXTERNAL_CANDIDATE_REPORT_FILE:-$APP_DIR/external-candidates.report.txt}"
+EXTERNAL_RUNTIME_IP_FILE=""
 LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
 CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
@@ -93,12 +96,26 @@ load_config() {
   CFST_DEGRADE_MIN_SPEED="${CFST_DEGRADE_MIN_SPEED:-2}"
   CFST_FAIL_EVICT_COUNT="${CFST_FAIL_EVICT_COUNT:-3}"
   CFST_FINAL_CANDIDATE_LIMIT="${CFST_FINAL_CANDIDATE_LIMIT:-20}"
+  CFST_EXTERNAL_CANDIDATES="${CFST_EXTERNAL_CANDIDATES:-0}"
+  CFST_EXTERNAL_CANDIDATE_URLS="${CFST_EXTERNAL_CANDIDATE_URLS:-}"
+  CFST_EXTERNAL_CANDIDATE_LIMIT="${CFST_EXTERNAL_CANDIDATE_LIMIT:-5000}"
+  CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT="${CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT:-2000}"
+  CFST_EXTERNAL_CANDIDATE_URL_LIMIT="${CFST_EXTERNAL_CANDIDATE_URL_LIMIT:-5}"
+  CFST_EXTERNAL_CANDIDATE_MAX_BYTES="${CFST_EXTERNAL_CANDIDATE_MAX_BYTES:-1048576}"
+  CFST_EXTERNAL_CANDIDATE_MAX_LINES="${CFST_EXTERNAL_CANDIDATE_MAX_LINES:-20000}"
+  CFST_EXTERNAL_CANDIDATE_ALLOWED_HOSTS="${CFST_EXTERNAL_CANDIDATE_ALLOWED_HOSTS:-raw.githubusercontent.com}"
+  CFST_EXTERNAL_CANDIDATE_MODE="${CFST_EXTERNAL_CANDIDATE_MODE:-append}"
+  CFST_EXTERNAL_CANDIDATES_ALLOW_DNS="${CFST_EXTERNAL_CANDIDATES_ALLOW_DNS:-0}"
+  CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION="${CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION:-0}"
+  CFST_ISP_PROFILE="${CFST_ISP_PROFILE:-}"
   normalize_retention_config
+  normalize_external_candidate_config
   CFST_MAX_LATENCY="${CFST_MAX_LATENCY:-9999}"
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
   IP_VERSION="${IP_VERSION:-ipv4}"
   DRY_RUN="${DRY_RUN:-1}"
+  enforce_external_candidate_safety
   PROXY_PLUGIN="${PROXY_PLUGIN:-0}"
   PROXY_RESTART_WAIT="${PROXY_RESTART_WAIT:-30}"
   TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
@@ -116,6 +133,29 @@ normalize_retention_config() {
   CFST_RETAIN_RATIO="$(awk -v v="$CFST_RETAIN_RATIO" 'BEGIN {v+=0; if (v <= 0 || v > 1) v=0.90; printf "%.2f", v}')"
   CFST_REPLACE_IMPROVE_RATIO="$(awk -v v="$CFST_REPLACE_IMPROVE_RATIO" 'BEGIN {v+=0; if (v < 1) v=1.25; printf "%.2f", v}')"
   CFST_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=2; printf "%.2f", v}')"
+}
+
+normalize_external_candidate_config() {
+  CFST_EXTERNAL_CANDIDATE_LIMIT="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_LIMIT" 'BEGIN {v+=0; if (v < 1) v=5000; print int(v)}')"
+  CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT" 'BEGIN {v+=0; if (v < 1) v=2000; print int(v)}')"
+  CFST_EXTERNAL_CANDIDATE_URL_LIMIT="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_URL_LIMIT" 'BEGIN {v+=0; if (v < 1) v=5; if (v > 20) v=20; print int(v)}')"
+  CFST_EXTERNAL_CANDIDATE_MAX_BYTES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_BYTES" 'BEGIN {v+=0; if (v < 1024) v=1048576; print int(v)}')"
+  CFST_EXTERNAL_CANDIDATE_MAX_LINES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_LINES" 'BEGIN {v+=0; if (v < 1) v=20000; print int(v)}')"
+  case "$CFST_EXTERNAL_CANDIDATE_MODE" in
+    append) ;;
+    *) CFST_EXTERNAL_CANDIDATE_MODE="append" ;;
+  esac
+  case "$CFST_ISP_PROFILE" in
+    ""|cmcc|cu|ct|cf) ;;
+    *) die "CFST_ISP_PROFILE 仅支持空值、cmcc、cu、ct、cf" ;;
+  esac
+}
+
+enforce_external_candidate_safety() {
+  [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] || return 0
+  if [ "${CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION:-0}" != "1" ]; then
+    CFST_CHAMPION_POOL=0
+  fi
 }
 
 rotate_file_if_needed() {
@@ -331,6 +371,211 @@ prepare_reverse_ip_list() {
   log "反代 IP 列表准备完成：$(wc -l < "$IP_FILE" | tr -d ' ') 条"
 }
 
+isp_profile_url() {
+  case "$1" in
+    cmcc) printf '%s\n' "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR/cmcc.txt" ;;
+    cu) printf '%s\n' "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR/cu.txt" ;;
+    ct) printf '%s\n' "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR/ct.txt" ;;
+    cf) printf '%s\n' "https://raw.githubusercontent.com/cmliu/cmliu/main/CF-CIDR.txt" ;;
+    *) return 1 ;;
+  esac
+}
+
+url_host() {
+  printf '%s\n' "$1" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#/.*##' -e 's#^\[\(.*\)\]$#\1#' -e 's#:[0-9][0-9]*$##'
+}
+
+external_url_allowed() {
+  local url="$1" host allowed
+  case "$url" in
+    https://*) ;;
+    *) return 1 ;;
+  esac
+  host="$(url_host "$url" | tr 'A-Z' 'a-z')"
+  [ -n "$host" ] || return 1
+  printf '%s\n' "$host" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$|:' && return 1
+  case "$host" in
+    localhost|*.localhost|127.*|10.*|172.16.*|172.17.*|172.18.*|172.19.*|172.2?.*|172.30.*|172.31.*|192.168.*|169.254.*|0.*|::1) return 1 ;;
+  esac
+  for allowed in $CFST_EXTERNAL_CANDIDATE_ALLOWED_HOSTS; do
+    [ "$host" = "$(printf '%s' "$allowed" | tr 'A-Z' 'a-z')" ] && return 0
+  done
+  return 1
+}
+
+download_external_candidate_source() {
+  local url="$1" output="$2"
+  external_url_allowed "$url" || {
+    printf 'reject_url\t%s\tinvalid_protocol_or_host\n' "$url" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+    return 1
+  }
+  if curl -fsS --connect-timeout 10 --max-time 30 --retry 1 --retry-delay 1 "$url" \
+    | head -c "$CFST_EXTERNAL_CANDIDATE_MAX_BYTES" \
+    | awk -v max_lines="$CFST_EXTERNAL_CANDIDATE_MAX_LINES" 'NR <= max_lines {print}' > "$output"; then
+    printf 'source_ok\t%s\tbytes=%s\tlines=%s\n' "$url" "$(wc -c < "$output" | tr -d ' ')" "$(wc -l < "$output" | tr -d ' ')" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+    return 0
+  fi
+  printf 'source_error\t%s\tdownload_failed\n' "$url" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+  return 1
+}
+
+normalize_candidate_ips() {
+  awk -v ip_version="$IP_VERSION" -v limit="$CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT" '
+    function emit(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      gsub(/^\[/, "", value)
+      gsub(/\]$/, "", value)
+      if (value == "" || length(value) > 80) return
+      is_v6 = (value ~ /:/)
+      is_v4 = (value ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/)
+      is_v6_cidr = (value ~ /^[0-9A-Fa-f:]+(\/[0-9]+)?$/ && is_v6)
+      if (ip_version == "ipv6") {
+        if (!is_v6_cidr) return
+      } else {
+        if (!is_v4) return
+      }
+      if (!seen[value]++ && count < limit) {
+        print value
+        count++
+      }
+    }
+    {
+      line=$0
+      sub(/\r$/, "", line)
+      sub(/#.*/, "", line)
+      gsub(/"/, "", line)
+      gsub(/\t/, ",", line)
+      n=split(line, parts, ",")
+      for (i=1; i<=n; i++) {
+        token=parts[i]
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", token)
+        if (token == "" || token ~ /IP|地址|延迟|下载速度|端口|国家|城市|数据中心/) continue
+        if (token ~ /^\[[0-9A-Fa-f:]+\]:[0-9]+$/) {
+          sub(/^\[/, "", token)
+          sub(/\]:[0-9]+$/, "", token)
+        } else if (token ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$/) {
+          sub(/:[0-9]+$/, "", token)
+        }
+        emit(token)
+      }
+    }
+  '
+}
+
+cloudflare_filter_candidates() {
+  local ranges_file="$1"
+  if [ "$IP_VERSION" = "ipv6" ]; then
+    printf 'reject_ipv6\tfail_closed_ipv6_cidr_filter_not_supported\n' >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+    return 0
+  fi
+  awk '
+    function ip2int(ip, parts) {
+      split(ip, parts, ".")
+      return parts[1] * 16777216 + parts[2] * 65536 + parts[3] * 256 + parts[4]
+    }
+    function prefix_match(ip, base, prefix, octets, rem, ip_parts, base_parts, mask, i) {
+      split(ip, ip_parts, ".")
+      split(base, base_parts, ".")
+      octets=int(prefix / 8)
+      rem=prefix % 8
+      for (i=1; i<=octets; i++) {
+        if ((ip_parts[i] + 0) != (base_parts[i] + 0)) return 0
+      }
+      if (rem == 0) return 1
+      mask=256 - (2 ^ (8 - rem))
+      return int((ip_parts[octets + 1] + 0) / (256 - mask)) == int((base_parts[octets + 1] + 0) / (256 - mask))
+    }
+    function in_cidr(ip, cidr, a, base, prefix) {
+      split(cidr, a, "/")
+      base=a[1]
+      prefix=(a[2] == "" ? 32 : a[2] + 0)
+      if (ip !~ /^[0-9]+\./ || base !~ /^[0-9]+\./) return 0
+      if (prefix < 0 || prefix > 32) return 0
+      return prefix_match(ip, base, prefix)
+    }
+    FNR == NR {
+      if ($1 != "") cidr[++cidr_count]=$1
+      next
+    }
+    $1 != "" {
+      ok=0
+      for (i=1; i<=cidr_count; i++) {
+        if (in_cidr($1, cidr[i])) {ok=1; break}
+      }
+      if (ok && !seen[$1]++) print $1
+    }
+  ' "$ranges_file" -
+}
+
+prepare_external_candidates_to_file() {
+  local output="$1" source_dir source_file normalized_file ranges_file url count profile_url
+  mkdir -p "$APP_DIR"
+  source_dir="$APP_DIR/external-candidate-sources"
+  rm -rf "$source_dir"
+  mkdir -p "$source_dir"
+  : > "$EXTERNAL_CANDIDATE_REPORT_FILE"
+  : > "$output"
+  printf 'checked_at\t%s\n' "$(date '+%F %T')" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+  printf 'ip_version\t%s\n' "$IP_VERSION" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+
+  count=0
+  if [ -n "$CFST_ISP_PROFILE" ]; then
+    profile_url="$(isp_profile_url "$CFST_ISP_PROFILE")" || profile_url=""
+    if [ -n "$profile_url" ]; then
+      count=$((count + 1))
+      source_file="$source_dir/source-$count.txt"
+      download_external_candidate_source "$profile_url" "$source_file" || true
+    fi
+  fi
+  for url in $CFST_EXTERNAL_CANDIDATE_URLS; do
+    count=$((count + 1))
+    if [ "$count" -gt "$CFST_EXTERNAL_CANDIDATE_URL_LIMIT" ]; then
+      printf 'reject_url\t%s\turl_limit_exceeded\n' "$url" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+      continue
+    fi
+    source_file="$source_dir/source-$count.txt"
+    download_external_candidate_source "$url" "$source_file" || true
+  done
+
+  normalized_file="$APP_DIR/external-candidates.normalized.tmp"
+  : > "$normalized_file"
+  for source_file in "$source_dir"/source-*.txt; do
+    [ -s "$source_file" ] || continue
+    normalize_candidate_ips < "$source_file" >> "$normalized_file"
+  done
+
+  ranges_file="$APP_DIR/external-candidates.cloudflare-ranges.tmp"
+  if [ "$IP_VERSION" = "ipv6" ]; then
+    download_if_missing "$DEFAULT_IPV6_LIST" "$ranges_file"
+  else
+    download_if_missing "$DEFAULT_IPV4_LIST" "$ranges_file"
+  fi
+  if [ -s "$normalized_file" ] && [ -s "$ranges_file" ]; then
+    cloudflare_filter_candidates "$ranges_file" < "$normalized_file" | awk -v limit="$CFST_EXTERNAL_CANDIDATE_LIMIT" 'NF && !seen[$1]++ && count < limit {print $1; count++}' > "$output"
+  fi
+  printf 'normalized_count\t%s\n' "$(wc -l < "$normalized_file" 2>/dev/null | tr -d ' ')" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+  printf 'accepted_count\t%s\n' "$(wc -l < "$output" 2>/dev/null | tr -d ' ')" >> "$EXTERNAL_CANDIDATE_REPORT_FILE"
+}
+
+merge_external_candidates_if_enabled() {
+  [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] || return 0
+  local external_file merged_file base_count external_count merged_count
+  external_file="$APP_DIR/external-candidates.runtime.txt"
+  prepare_external_candidates_to_file "$external_file"
+  [ -s "$external_file" ] || {
+    log "外部候选源：未获得可用 Cloudflare 候选，继续使用基础 IP 列表"
+    return 0
+  }
+  base_count="$(wc -l < "$IP_FILE" | tr -d ' ')"
+  external_count="$(wc -l < "$external_file" | tr -d ' ')"
+  merged_file="/tmp/cf-dns-speedup-ip-merged.$$"
+  awk 'NF && !seen[$1]++ {print $1}' "$IP_FILE" "$external_file" > "$merged_file"
+  EXTERNAL_RUNTIME_IP_FILE="$merged_file"
+  IP_FILE="$merged_file"
+  merged_count="$(wc -l < "$IP_FILE" | tr -d ' ')"
+  log "外部候选源：已临时追加 $external_count 条，基础 $base_count 条，合并后 $merged_count 条；不改写生产 ip.txt"
+}
+
 prepare_assets() {
   mkdir -p "$APP_DIR"
   prepare_cfst
@@ -339,6 +584,7 @@ prepare_assets() {
   else
     prepare_official_ip_list
   fi
+  merge_external_candidates_if_enabled
   [ -s "$IP_FILE" ] || die "IP 列表为空：$IP_FILE"
   log "IP 列表准备完成：$(wc -l < "$IP_FILE" | tr -d ' ') 条"
 }
@@ -402,6 +648,9 @@ cleanup_on_exit() {
   if [ -n "$RUN_STARTED_AT" ]; then
     [ "$RUN_STATUS" = "not-started" ] && RUN_STATUS="success"
     write_run_summary || true
+  fi
+  if [ -n "$EXTERNAL_RUNTIME_IP_FILE" ] && [ -f "$EXTERNAL_RUNTIME_IP_FILE" ]; then
+    rm -f "$EXTERNAL_RUNTIME_IP_FILE"
   fi
   release_lock
 }
@@ -629,6 +878,10 @@ sort_stability_results() {
 
 update_champion_pool() {
   [ "${CFST_CHAMPION_POOL:-0}" = "1" ] || return 0
+  if [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] && [ "${CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION:-0}" != "1" ]; then
+    log "冠军池：外部候选源实验默认不写入冠军池"
+    return 0
+  fi
   [ -s "$STABILITY_RESULT_FILE" ] || return 0
   local tmp old now
   tmp="$APP_DIR/champion-pool.tmp"
@@ -983,6 +1236,9 @@ update_cloudflare() {
     best_ip_list | tee -a "$INFORM_LOG"
     return 0
   fi
+  if [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] && [ "${CFST_EXTERNAL_CANDIDATES_ALLOW_DNS:-0}" != "1" ]; then
+    die "外部候选源实验默认不允许更新 Cloudflare DNS"
+  fi
 
   check_cloudflare_auth
   if [ "$DOMAIN_UPDATE_MODE" = "one_to_one" ]; then
@@ -1210,6 +1466,32 @@ validate_current_command() {
   cat "$VALIDATE_RESULT_FILE"
 }
 
+external_candidate_check_command() {
+  mkdir -p "$APP_DIR"
+  : > "$EXTERNAL_CANDIDATE_CHECK_FILE"
+  prepare_external_candidates_to_file "$EXTERNAL_CANDIDATE_CHECK_FILE"
+  {
+    echo "=== external-candidate-check ==="
+    date
+    echo
+    echo "=== config ==="
+    printf 'CFST_EXTERNAL_CANDIDATES=%s\n' "$CFST_EXTERNAL_CANDIDATES"
+    printf 'CFST_ISP_PROFILE=%s\n' "$CFST_ISP_PROFILE"
+    printf 'CFST_EXTERNAL_CANDIDATE_URL_LIMIT=%s\n' "$CFST_EXTERNAL_CANDIDATE_URL_LIMIT"
+    printf 'CFST_EXTERNAL_CANDIDATE_LIMIT=%s\n' "$CFST_EXTERNAL_CANDIDATE_LIMIT"
+    printf 'CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT=%s\n' "$CFST_EXTERNAL_CANDIDATE_SOURCE_LIMIT"
+    printf 'CFST_EXTERNAL_CANDIDATE_ALLOWED_HOSTS=%s\n' "$CFST_EXTERNAL_CANDIDATE_ALLOWED_HOSTS"
+    printf 'IP_VERSION=%s\n' "$IP_VERSION"
+    echo
+    echo "=== report ==="
+    cat "$EXTERNAL_CANDIDATE_REPORT_FILE" 2>/dev/null || true
+    echo
+    echo "=== candidates ==="
+    printf 'accepted_count=%s\n' "$(wc -l < "$EXTERNAL_CANDIDATE_CHECK_FILE" 2>/dev/null | tr -d ' ')"
+    head -n 30 "$EXTERNAL_CANDIDATE_CHECK_FILE" 2>/dev/null || true
+  }
+}
+
 stability_update_command() {
   acquire_lock
   rotate_logs
@@ -1235,6 +1517,14 @@ stability_update_command() {
 main() {
   load_config
   need_cmd curl
+  case "${1:-run}" in
+    external-candidate-check)
+      need_cmd awk
+      need_cmd sed
+      external_candidate_check_command
+      return
+      ;;
+  esac
   install_deps_openwrt
   need_cmd jq
   need_cmd timeout
@@ -1245,6 +1535,7 @@ main() {
     run) run_once ;;
     health-check) health_check_command ;;
     validate-current) validate_current_command ;;
+    external-candidate-check) external_candidate_check_command ;;
     stability-update) stability_update_command ;;
     delete-records) delete_records_command ;;
     *) die "未知命令：$1" ;;
