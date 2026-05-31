@@ -10,6 +10,7 @@ STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
+EXTERNAL_OBSERVATION_POOL_FILE="${EXTERNAL_OBSERVATION_POOL_FILE:-$APP_DIR/external-observation-pool.tsv}"
 EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
 EXTERNAL_CANDIDATE_REPORT_FILE="${EXTERNAL_CANDIDATE_REPORT_FILE:-$APP_DIR/external-candidates.report.txt}"
 EXTERNAL_RUNTIME_IP_FILE=""
@@ -107,6 +108,10 @@ load_config() {
   CFST_EXTERNAL_CANDIDATE_MODE="${CFST_EXTERNAL_CANDIDATE_MODE:-append}"
   CFST_EXTERNAL_CANDIDATES_ALLOW_DNS="${CFST_EXTERNAL_CANDIDATES_ALLOW_DNS:-0}"
   CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION="${CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION:-0}"
+  CFST_EXTERNAL_OBSERVATION_POOL="${CFST_EXTERNAL_OBSERVATION_POOL:-1}"
+  CFST_EXTERNAL_PROMOTION_ROUNDS="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}"
+  CFST_EXTERNAL_PROMOTION_MIN_SPEED="${CFST_EXTERNAL_PROMOTION_MIN_SPEED:-0}"
+  CFST_EXTERNAL_OBSERVATION_EVICT_FAILS="${CFST_EXTERNAL_OBSERVATION_EVICT_FAILS:-3}"
   CFST_ISP_PROFILE="${CFST_ISP_PROFILE:-}"
   normalize_retention_config
   normalize_external_candidate_config
@@ -141,6 +146,9 @@ normalize_external_candidate_config() {
   CFST_EXTERNAL_CANDIDATE_URL_LIMIT="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_URL_LIMIT" 'BEGIN {v+=0; if (v < 1) v=5; if (v > 20) v=20; print int(v)}')"
   CFST_EXTERNAL_CANDIDATE_MAX_BYTES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_BYTES" 'BEGIN {v+=0; if (v < 1024) v=1048576; print int(v)}')"
   CFST_EXTERNAL_CANDIDATE_MAX_LINES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_LINES" 'BEGIN {v+=0; if (v < 1) v=20000; print int(v)}')"
+  CFST_EXTERNAL_PROMOTION_ROUNDS="$(awk -v v="$CFST_EXTERNAL_PROMOTION_ROUNDS" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
+  CFST_EXTERNAL_PROMOTION_MIN_SPEED="$(awk -v v="$CFST_EXTERNAL_PROMOTION_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=0; printf "%.2f", v}')"
+  CFST_EXTERNAL_OBSERVATION_EVICT_FAILS="$(awk -v v="$CFST_EXTERNAL_OBSERVATION_EVICT_FAILS" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
   case "$CFST_EXTERNAL_CANDIDATE_MODE" in
     append) ;;
     *) CFST_EXTERNAL_CANDIDATE_MODE="append" ;;
@@ -936,6 +944,112 @@ update_champion_pool() {
   log "冠军池：已更新 $CHAMPION_POOL_FILE，最多保留 ${CFST_CHAMPION_POOL_SIZE} 个 IP"
 }
 
+update_external_observation_pool() {
+  [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] || return 0
+  [ "${CFST_EXTERNAL_OBSERVATION_POOL:-1}" = "1" ] || return 0
+  [ -s "$STABILITY_RESULT_FILE" ] || return 0
+  local external_file="$APP_DIR/external-candidates.runtime.txt"
+  [ -s "$external_file" ] || return 0
+
+  local tmp old matched now source_label
+  tmp="$APP_DIR/external-observation-pool.tmp"
+  old="$APP_DIR/external-observation-pool.old.tsv"
+  matched="$APP_DIR/external-observation-matched.tmp"
+  now="$(date '+%F %T')"
+  source_label="external"
+  [ -n "${CFST_ISP_PROFILE:-}" ] && source_label="external:${CFST_ISP_PROFILE}"
+  [ -s "$EXTERNAL_OBSERVATION_POOL_FILE" ] && cp "$EXTERNAL_OBSERVATION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tpass_count\tfail_count\tconsecutive_passes\tconsecutive_fails\tfirst_seen\tlast_seen\tsource\tstatus\n' > "$old"
+
+  awk -F '\t' '
+    function ip2num(ip, parts) {
+      split(ip, parts, ".")
+      return (parts[1] * 16777216) + (parts[2] * 65536) + (parts[3] * 256) + parts[4]
+    }
+    function in_cidr(ip, cidr, bits, arr, mask) {
+      if (cidr !~ /\//) return ip == cidr
+      split(cidr, arr, "/")
+      bits = arr[2] + 0
+      if (bits < 0 || bits > 32) return 0
+      mask = bits == 0 ? 0 : 4294967296 - (2 ^ (32 - bits))
+      return and(ip2num(ip), mask) == and(ip2num(arr[1]), mask)
+    }
+    FNR == NR {
+      if ($1 != "") external[++external_count]=$1
+      next
+    }
+    FNR != NR {
+      if (FNR == 1 || $1 == "") next
+      ip=$1
+      matched=0
+      for (i=1; i<=external_count; i++) {
+        if (in_cidr(ip, external[i])) {matched=1; break}
+      }
+      if (matched) print
+    }
+  ' "$external_file" "$STABILITY_RESULT_FILE" > "$matched"
+  [ -s "$matched" ] || return 0
+
+  awk -F '\t' \
+    -v now="$now" \
+    -v source_label="$source_label" \
+    -v min_speed="${CFST_EXTERNAL_PROMOTION_MIN_SPEED:-0}" \
+    -v rounds="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}" \
+    -v evict="${CFST_EXTERNAL_OBSERVATION_EVICT_FAILS:-3}" '
+    function clean(v) {
+      gsub(/[\t\r\n[:cntrl:]]+/, "_", v)
+      return v
+    }
+    function add_source(ip, s) {
+      s = clean(s)
+      if (source[ip] == "") source[ip] = s
+      else if (source[ip] !~ "(^|,)" s "(,|$)") source[ip] = source[ip] "," s
+    }
+    FNR == NR {
+      if (FNR > 1 && $1 != "") {
+        ip=$1
+        best_min[ip]=$2+0; best_avg[ip]=$3+0; recent[ip]=$4+0
+        pass[ip]=$5+0; fail[ip]=$6+0; cpass[ip]=$7+0; cfail[ip]=$8+0
+        first[ip]=$9; last[ip]=$10; source[ip]=clean($11); status[ip]=$12
+        order[++order_count]=ip; seen[ip]=1
+      }
+      next
+    }
+    FNR != NR {
+      if ($1 == "") next
+      ip=$1
+      min=$4+0; avg=$5+0; ok=$6+0
+      good=(ok > 0 && min >= min_speed)
+      if (!(ip in seen)) {
+        order[++order_count]=ip
+        first[ip]=now; best_min[ip]=0; best_avg[ip]=0; recent[ip]=0
+        pass[ip]=0; fail[ip]=0; cpass[ip]=0; cfail[ip]=0; seen[ip]=1
+      }
+      recent[ip]=min; last[ip]=now; add_source(ip, source_label)
+      if (min > best_min[ip]) best_min[ip]=min
+      if (avg > best_avg[ip]) best_avg[ip]=avg
+      if (good) {
+        pass[ip]++; cpass[ip]++; cfail[ip]=0
+      } else {
+        fail[ip]++; cfail[ip]++; cpass[ip]=0
+      }
+      if (cfail[ip] >= evict) status[ip]="degraded"
+      else if (cpass[ip] >= rounds && min >= min_speed) status[ip]="eligible_manual_review"
+      else status[ip]="observing"
+    }
+    END {
+      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tpass_count\tfail_count\tconsecutive_passes\tconsecutive_fails\tfirst_seen\tlast_seen\tsource\tstatus"
+      for (i=1; i<=order_count; i++) {
+        ip=order[i]
+        if (printed[ip]) continue
+        printed[ip]=1
+        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" pass[ip] "\t" fail[ip] "\t" cpass[ip] "\t" cfail[ip] "\t" first[ip] "\t" last[ip] "\t" clean(source[ip]) "\t" status[ip]
+      }
+    }
+  ' "$old" "$matched" > "$tmp"
+  mv "$tmp" "$EXTERNAL_OBSERVATION_POOL_FILE"
+  log "外部观察池：已更新 $EXTERNAL_OBSERVATION_POOL_FILE；eligible 仅表示需要人工复核，不自动更新 DNS"
+}
+
 run_stability_retest() {
   rm -f "$STABILITY_RESULT_FILE"
   [ "${CFST_STABILITY_TEST_COUNT:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -1002,6 +1116,7 @@ run_stability_retest() {
       sort_stability_results < "$sorted_file"
     } > "$STABILITY_RESULT_FILE"
     update_champion_pool
+    update_external_observation_pool
     log "稳定性复测：完成，已按留任挑战、冠军池、最低速度和平均速度重新排序"
   fi
 }
@@ -1018,6 +1133,7 @@ selected_result_rows() {
     return 0
   fi
 
+  [ -s "$RESULT_FILE" ] || return 0
   awk -F, -v limit="$CFST_RESULT_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
     NR == 1 {next}
     $1 != "" {
@@ -1423,6 +1539,9 @@ validate_current_command() {
   local candidates
   candidates="$APP_DIR/validate-current.candidates.tsv"
   selected_result_rows | head -n "$CFST_RESULT_COUNT" > "$candidates"
+  if [ ! -s "$candidates" ]; then
+    current_dns_candidate_rows | awk -F '\t' '{print $1 "\t" ($2 + 0) "\t" ($3 + 0)}' | head -n "$CFST_RESULT_COUNT" > "$candidates"
+  fi
   [ -s "$candidates" ] || die "no selected IPs to validate"
 
   printf 'ip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$VALIDATE_RESULT_FILE"
@@ -1514,6 +1633,66 @@ stability_update_command() {
   log "稳定性复测更新完成"
 }
 
+external_observe_command() {
+  PUSH_MODE="ip"
+  DRY_RUN=1
+  PROXY_PLUGIN=0
+  CFST_CHAMPION_POOL=0
+  CFST_EXTERNAL_CANDIDATES=1
+  CFST_EXTERNAL_OBSERVATION_POOL=1
+  CFST_EXTERNAL_CANDIDATES_ALLOW_DNS=0
+  CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION=0
+  if [ -z "${CFST_ISP_PROFILE:-}" ] && [ -z "${CFST_EXTERNAL_CANDIDATE_URLS:-}" ]; then
+    CFST_ISP_PROFILE="cf"
+  fi
+  log "外部观察：强制 DRY_RUN=1、PUSH_MODE=ip、PROXY_PLUGIN=0、CFST_CHAMPION_POOL=0，不更新 DNS，不写冠军池"
+  run_once
+}
+
+observation_report_command() {
+  if [ ! -s "$EXTERNAL_OBSERVATION_POOL_FILE" ]; then
+    echo "external observation pool is empty: $EXTERNAL_OBSERVATION_POOL_FILE"
+    return 0
+  fi
+  {
+    echo "=== external-observation-report ==="
+    date
+    echo
+    echo "=== config ==="
+    printf 'pool_file=%s\n' "$EXTERNAL_OBSERVATION_POOL_FILE"
+    printf 'promotion_rounds=%s\n' "$CFST_EXTERNAL_PROMOTION_ROUNDS"
+    printf 'promotion_min_speed=%s\n' "$CFST_EXTERNAL_PROMOTION_MIN_SPEED"
+    printf 'evict_fails=%s\n' "$CFST_EXTERNAL_OBSERVATION_EVICT_FAILS"
+    echo
+    echo "=== eligible_manual_review ==="
+    awk -F '\t' 'NR == 1 || $12 == "eligible_manual_review" {print}' "$EXTERNAL_OBSERVATION_POOL_FILE"
+    echo
+    echo "=== recent ranking ==="
+    awk -F '\t' '
+      NR == 1 {next}
+      $1 != "" {
+        line[++n]=$0
+        recent[n]=$4+0
+        cpass[n]=$7+0
+        best[n]=$2+0
+      }
+      END {
+        for (i=1; i<=n; i++) {
+          pick=i
+          for (j=i+1; j<=n; j++) {
+            if (recent[j] > recent[pick] || (recent[j] == recent[pick] && cpass[j] > cpass[pick]) || (recent[j] == recent[pick] && cpass[j] == cpass[pick] && best[j] > best[pick])) pick=j
+          }
+          tmp=line[i]; line[i]=line[pick]; line[pick]=tmp
+          tmp=recent[i]; recent[i]=recent[pick]; recent[pick]=tmp
+          tmp=cpass[i]; cpass[i]=cpass[pick]; cpass[pick]=tmp
+          tmp=best[i]; best[i]=best[pick]; best[pick]=tmp
+          if (i <= 20) print line[i]
+        }
+      }
+    ' "$EXTERNAL_OBSERVATION_POOL_FILE"
+  }
+}
+
 main() {
   load_config
   need_cmd curl
@@ -1536,6 +1715,8 @@ main() {
     health-check) health_check_command ;;
     validate-current) validate_current_command ;;
     external-candidate-check) external_candidate_check_command ;;
+    external-observe) external_observe_command ;;
+    observation-report) observation_report_command ;;
     stability-update) stability_update_command ;;
     delete-records) delete_records_command ;;
     *) die "未知命令：$1" ;;
