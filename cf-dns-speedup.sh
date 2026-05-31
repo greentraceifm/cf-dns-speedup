@@ -9,6 +9,7 @@ RESULT_FILE="${RESULT_FILE:-$APP_DIR/result.csv}"
 STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
+CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
 LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
 CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
@@ -84,6 +85,15 @@ load_config() {
   CFST_STABILITY_CONNECT_TIMEOUT="${CFST_STABILITY_CONNECT_TIMEOUT:-6}"
   CFST_STABILITY_TIMEOUT="${CFST_STABILITY_TIMEOUT:-35}"
   VALIDATE_CURRENT_ROUNDS="${VALIDATE_CURRENT_ROUNDS:-2}"
+  CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
+  CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
+  CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
+  CFST_RETAIN_RATIO="${CFST_RETAIN_RATIO:-0.90}"
+  CFST_REPLACE_IMPROVE_RATIO="${CFST_REPLACE_IMPROVE_RATIO:-1.25}"
+  CFST_DEGRADE_MIN_SPEED="${CFST_DEGRADE_MIN_SPEED:-2}"
+  CFST_FAIL_EVICT_COUNT="${CFST_FAIL_EVICT_COUNT:-3}"
+  CFST_FINAL_CANDIDATE_LIMIT="${CFST_FINAL_CANDIDATE_LIMIT:-20}"
+  normalize_retention_config
   CFST_MAX_LATENCY="${CFST_MAX_LATENCY:-9999}"
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
@@ -97,6 +107,15 @@ load_config() {
   PUSHPLUS_TOKEN="${PUSHPLUS_TOKEN:-}"
   LOG_MAX_KB="${LOG_MAX_KB:-1024}"
   LOG_KEEP_DAYS="${LOG_KEEP_DAYS:-14}"
+}
+
+normalize_retention_config() {
+  CFST_CHAMPION_POOL_SIZE="$(awk -v v="$CFST_CHAMPION_POOL_SIZE" 'BEGIN {v+=0; if (v < 1) v=10; print int(v)}')"
+  CFST_FAIL_EVICT_COUNT="$(awk -v v="$CFST_FAIL_EVICT_COUNT" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
+  CFST_FINAL_CANDIDATE_LIMIT="$(awk -v v="$CFST_FINAL_CANDIDATE_LIMIT" 'BEGIN {v+=0; if (v < 1) v=20; print int(v)}')"
+  CFST_RETAIN_RATIO="$(awk -v v="$CFST_RETAIN_RATIO" 'BEGIN {v+=0; if (v <= 0 || v > 1) v=0.90; printf "%.2f", v}')"
+  CFST_REPLACE_IMPROVE_RATIO="$(awk -v v="$CFST_REPLACE_IMPROVE_RATIO" 'BEGIN {v+=0; if (v < 1) v=1.25; printf "%.2f", v}')"
+  CFST_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=2; printf "%.2f", v}')"
 }
 
 rotate_file_if_needed() {
@@ -496,6 +515,174 @@ cfst_url_host() {
   printf '%s\n' "$CFST_URL" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#/.*##' -e 's#^\[\(.*\)\]$#\1#' -e 's#:[0-9][0-9]*$##'
 }
 
+current_dns_candidate_rows() {
+  [ "${CFST_COMPARE_CURRENT_DNS:-0}" = "1" ] || return 0
+  local names qtype
+  names="$CF_RECORD_NAMES"
+  [ -n "$names" ] || names="$CF_RECORD_NAME"
+  [ -n "$names" ] || return 0
+  case "$IP_VERSION" in
+    ipv6) qtype="AAAA" ;;
+    *) qtype="A" ;;
+  esac
+  for name in $names; do
+    if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_ZONE_ID" ] && command -v jq >/dev/null 2>&1; then
+      local api response ip
+      api="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=$qtype&name=$name"
+      response="$(cf_api GET "$api" 2>/dev/null || true)"
+      echo "$response" | jq -r '.result[]?.content // empty' 2>/dev/null | awk -v source="current_dns" '
+        $1 != "" && !seen[$1]++ {print $1 "\t0\t0\t" source}
+      '
+    elif command -v nslookup >/dev/null 2>&1; then
+      nslookup "$name" 127.0.0.1 2>/dev/null | awk -v source="current_dns" '
+        /^Address [0-9]+: / && $3 !~ /^(127\.|::1)/ && !seen[$3]++ {print $3 "\t0\t0\t" source}
+        /^Address: / && $2 !~ /^(127\.|::1)/ && !seen[$2]++ {print $2 "\t0\t0\t" source}
+      '
+    fi
+  done
+}
+
+champion_pool_candidate_rows() {
+  [ "${CFST_CHAMPION_POOL:-0}" = "1" ] || return 0
+  [ -s "$CHAMPION_POOL_FILE" ] || return 0
+  awk -F '\t' 'NR > 1 && $1 != "" {print $1 "\t0\t" ($2 + 0) "\tchampion"}' "$CHAMPION_POOL_FILE"
+}
+
+build_stability_candidates() {
+  local raw_file="$APP_DIR/stability-candidates.raw.tsv"
+  : > "$raw_file"
+  current_dns_candidate_rows >> "$raw_file"
+  champion_pool_candidate_rows >> "$raw_file"
+  awk -F, -v limit="$CFST_STABILITY_TEST_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
+    NR == 1 {next}
+    $1 != "" {
+      ip=$1
+      gsub(/[[:space:]]/, "", ip)
+      row=ip "\t" $5 "\t" $6 "\tnew"
+      if (min_speed > 0 && ($6 + 0) >= min_speed) preferred[++preferred_count]=row
+      else fallback[++fallback_count]=row
+    }
+    END {
+      count=0
+      for (i=1; i<=preferred_count && count<limit; i++) {print preferred[i]; count++}
+      for (i=1; i<=fallback_count && count<limit; i++) {print fallback[i]; count++}
+    }
+  ' "$RESULT_FILE" >> "$raw_file"
+
+  awk -F '\t' -v limit="${CFST_FINAL_CANDIDATE_LIMIT:-20}" '
+    $1 != "" {
+      ip=$1
+      if (!(ip in seen)) {
+        order[++count]=ip
+        latency[ip]=$2
+        speed[ip]=$3
+        source[ip]=$4
+        seen[ip]=1
+      } else {
+        if (source[ip] !~ "(^|,)" $4 "(,|$)") source[ip]=source[ip] "," $4
+        if (($3 + 0) > (speed[ip] + 0)) speed[ip]=$3
+        if ((latency[ip] + 0) == 0 && ($2 + 0) > 0) latency[ip]=$2
+      }
+    }
+    END {
+      for (i=1; i<=count && printed<limit; i++) {
+        ip=order[i]
+        print ip "\t" latency[ip] "\t" speed[ip] "\t" source[ip]
+        printed++
+      }
+    }
+  ' "$raw_file"
+}
+
+sort_stability_results() {
+  awk -F '\t' \
+    -v retain_ratio="${CFST_RETAIN_RATIO:-0.90}" \
+    -v replace_ratio="${CFST_REPLACE_IMPROVE_RATIO:-1.25}" \
+    -v degrade_min="${CFST_DEGRADE_MIN_SPEED:-2}" '
+    {
+      line[NR]=$0
+      min_speed[NR]=$4 + 0
+      avg_speed[NR]=$5 + 0
+      source[NR]=$7
+      boost[NR]=1
+      if (source[NR] ~ /(^|,)current_dns(,|$)/ && min_speed[NR] >= degrade_min) boost[NR]=replace_ratio
+      else if (source[NR] ~ /(^|,)champion(,|$)/ && min_speed[NR] >= degrade_min) boost[NR]=1 / retain_ratio
+      score[NR]=min_speed[NR] * boost[NR]
+    }
+    END {
+      for (i=1; i<=NR; i++) {
+        best=i
+        for (j=i+1; j<=NR; j++) {
+          if (score[j] > score[best] || (score[j] == score[best] && min_speed[j] > min_speed[best]) || (score[j] == score[best] && min_speed[j] == min_speed[best] && avg_speed[j] > avg_speed[best])) best=j
+        }
+        if (best != i) {
+          tmp=line[i]; line[i]=line[best]; line[best]=tmp
+          tmp=min_speed[i]; min_speed[i]=min_speed[best]; min_speed[best]=tmp
+          tmp=avg_speed[i]; avg_speed[i]=avg_speed[best]; avg_speed[best]=tmp
+          tmp=score[i]; score[i]=score[best]; score[best]=tmp
+        }
+        print line[i]
+      }
+    }
+  '
+}
+
+update_champion_pool() {
+  [ "${CFST_CHAMPION_POOL:-0}" = "1" ] || return 0
+  [ -s "$STABILITY_RESULT_FILE" ] || return 0
+  local tmp old now
+  tmp="$APP_DIR/champion-pool.tmp"
+  old="$APP_DIR/champion-pool.old.tsv"
+  now="$(date '+%F %T')"
+  [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\n' > "$old"
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" '
+    FNR == NR {
+      if (FNR > 1 && $1 != "") {
+        ip=$1; best_min[ip]=$2+0; best_avg[ip]=$3+0; recent[ip]=$4+0; fail[ip]=$5+0; first[ip]=$6; last[ip]=$7; source[ip]=$8
+        order[++order_count]=ip; seen[ip]=1
+      }
+      next
+    }
+    FNR > 1 && $1 != "" {
+      ip=$1; min=$4+0; avg=$5+0
+      if (!(ip in seen)) {
+        order[++order_count]=ip; first[ip]=now; best_min[ip]=min; best_avg[ip]=avg; fail[ip]=0; source[ip]=$7; seen[ip]=1
+      }
+      recent[ip]=min; last[ip]=now
+      if (min > best_min[ip]) best_min[ip]=min
+      if (avg > best_avg[ip]) best_avg[ip]=avg
+      if (source[ip] == "") source[ip]=$7
+      else if (source[ip] !~ "(^|,)" $7 "(,|$)") source[ip]=source[ip] "," $7
+      if (min < degrade) fail[ip]++
+      else fail[ip]=0
+    }
+    END {
+      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource"
+      for (i=1; i<=order_count; i++) {
+        ip=order[i]
+        if (printed_seen[ip]) continue
+        printed_seen[ip]=1
+        if (fail[ip] >= evict) continue
+        candidate[++candidate_count]=ip
+      }
+      for (i=1; i<=candidate_count; i++) {
+        best=i
+        for (j=i+1; j<=candidate_count; j++) {
+          a=candidate[j]; b=candidate[best]
+          if (best_min[a] > best_min[b] || (best_min[a] == best_min[b] && recent[a] > recent[b])) best=j
+        }
+        tmp=candidate[i]; candidate[i]=candidate[best]; candidate[best]=tmp
+      }
+      for (i=1; i<=candidate_count && i<=size; i++) {
+        ip=candidate[i]
+        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" fail[ip] "\t" first[ip] "\t" last[ip] "\t" source[ip]
+      }
+    }
+  ' "$old" "$STABILITY_RESULT_FILE" > "$tmp"
+  mv "$tmp" "$CHAMPION_POOL_FILE"
+  log "冠军池：已更新 $CHAMPION_POOL_FILE，最多保留 ${CFST_CHAMPION_POOL_SIZE} 个 IP"
+}
+
 run_stability_retest() {
   rm -f "$STABILITY_RESULT_FILE"
   [ "${CFST_STABILITY_TEST_COUNT:-0}" -gt 0 ] 2>/dev/null || return 0
@@ -513,36 +700,13 @@ run_stability_retest() {
   sorted_file="$APP_DIR/stability-sorted.tsv"
   rm -f "$candidate_file" "$raw_file" "$sorted_file"
 
-  awk -F, -v limit="$CFST_STABILITY_TEST_COUNT" -v min_speed="${CFST_PREFER_MIN_SPEED:-0}" '
-    NR == 1 {next}
-    $1 != "" {
-      ip=$1
-      gsub(/[[:space:]]/, "", ip)
-      row=ip "\t" $5 "\t" $6
-      if (min_speed > 0 && ($6 + 0) >= min_speed) {
-        preferred[++preferred_count]=row
-      } else {
-        fallback[++fallback_count]=row
-      }
-    }
-    END {
-      count=0
-      for (i=1; i<=preferred_count && count<limit; i++) {
-        print preferred[i]
-        count++
-      }
-      for (i=1; i<=fallback_count && count<limit; i++) {
-        print fallback[i]
-        count++
-      }
-    }
-  ' "$RESULT_FILE" > "$candidate_file"
+  build_stability_candidates > "$candidate_file"
   [ -s "$candidate_file" ] || return 0
 
   log "稳定性复测：对前 $(wc -l < "$candidate_file" | tr -d ' ') 个候选做 ${CFST_STABILITY_TEST_ROUNDS} 轮真实下载，地址 $CFST_URL"
-  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$STABILITY_RESULT_FILE"
+  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n' > "$STABILITY_RESULT_FILE"
 
-  while IFS="$(printf '\t')" read -r ip latency cfst_speed; do
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed source; do
     [ -n "$ip" ] || continue
     local round ok speed_bps
     round=1
@@ -564,7 +728,7 @@ run_stability_retest() {
       round=$((round + 1))
     done
 
-    awk -v ip="$ip" -v latency="$latency" -v cfst_speed="$cfst_speed" -v ok="$ok" '
+    awk -v ip="$ip" -v latency="$latency" -v cfst_speed="$cfst_speed" -v ok="$ok" -v source="$source" '
       BEGIN {min = ""; sum = 0; count = 0}
       {
         speed = $1 + 0
@@ -574,39 +738,18 @@ run_stability_retest() {
       }
       END {
         avg = count > 0 ? sum / count : 0
-        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\n", ip, latency, cfst_speed, min + 0, avg, ok
+        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\t%s\n", ip, latency, cfst_speed, min + 0, avg, ok, source
       }
     ' "$raw_file" >> "$sorted_file"
   done < "$candidate_file"
 
   if [ -s "$sorted_file" ]; then
     {
-      printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n'
-      awk -F '\t' '
-        {
-          line[NR]=$0
-          min_speed[NR]=$4 + 0
-          avg_speed[NR]=$5 + 0
-        }
-        END {
-          for (i=1; i<=NR; i++) {
-            best=i
-            for (j=i+1; j<=NR; j++) {
-              if (min_speed[j] > min_speed[best] || (min_speed[j] == min_speed[best] && avg_speed[j] > avg_speed[best])) {
-                best=j
-              }
-            }
-            if (best != i) {
-              tmp=line[i]; line[i]=line[best]; line[best]=tmp
-              tmp=min_speed[i]; min_speed[i]=min_speed[best]; min_speed[best]=tmp
-              tmp=avg_speed[i]; avg_speed[i]=avg_speed[best]; avg_speed[best]=tmp
-            }
-            print line[i]
-          }
-        }
-      ' "$sorted_file"
+      printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n'
+      sort_stability_results < "$sorted_file"
     } > "$STABILITY_RESULT_FILE"
-    log "稳定性复测：完成，按最低速度优先、平均速度次之重新排序"
+    update_champion_pool
+    log "稳定性复测：完成，已按留任挑战、冠军池、最低速度和平均速度重新排序"
   fi
 }
 
