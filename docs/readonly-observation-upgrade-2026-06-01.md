@@ -9,6 +9,7 @@ Add daytime/evening observation without automatic DNS changes, proxy restarts, o
 - `validate-current` now verifies the real current Cloudflare DNS records first. It only falls back to locally selected rows if DNS records cannot be read.
 - `stability-verify` writes to `result.stability.verify.tsv` instead of overwriting the production `result.stability.tsv`.
 - `observe-current` runs current-DNS validation and appends rows to `observation-history.tsv`.
+- `current-observation-report` summarizes current-DNS observation history and marks IPs as `active`, `watch`, or `stale`.
 - `install-observe-cron` installs a read-only observation cron using `CFST_OBSERVE_CRON`.
 - Added `CFST_CHAMPION_FAIL_MIN_SPEED`, defaulting to `CFST_RETAIN_MIN_SPEED`, so champion-pool failure tracking follows the video-throughput floor instead of only the hard degradation floor.
 - Raised default `CFST_FINAL_CANDIDATE_LIMIT` from 20 to 30 to leave room for current DNS, champion pool, and new challengers.
@@ -21,6 +22,7 @@ Approved use:
 
 ```sh
 bash ./cf-dns-speedup.sh observe-current
+bash ./cf-dns-speedup.sh current-observation-report
 bash ./cf-dns-speedup.sh install-observe-cron
 ```
 
@@ -57,3 +59,25 @@ Latest verification top 5 from `result.stability.verify.tsv`:
 104.17.158.242  min 8.47 MB/s
 104.17.128.154  min 8.45 MB/s
 ```
+
+## Current Observation Report
+
+`current-observation-report` was deployed and verified on 2026-06-01 CST.
+
+Generated report path:
+
+```text
+/root/cf-dns-speedup/current-observation-report.latest.txt
+```
+
+Latest status summary:
+
+```text
+104.17.134.190  active
+104.17.158.242  active
+104.17.156.195  watch
+104.17.151.5    active
+104.17.128.154  active
+```
+
+`104.17.156.195` was marked `watch` because one evening observation fell below the 8 MB/s threshold, but the later 20:30 observation recovered to 8.60 MB/s. No automatic action was taken.

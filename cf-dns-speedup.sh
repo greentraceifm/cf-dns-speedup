@@ -11,6 +11,7 @@ STABILITY_VERIFY_RESULT_FILE="${STABILITY_VERIFY_RESULT_FILE:-$APP_DIR/result.st
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
+CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
 EXTERNAL_OBSERVATION_POOL_FILE="${EXTERNAL_OBSERVATION_POOL_FILE:-$APP_DIR/external-observation-pool.tsv}"
 EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
@@ -92,6 +93,7 @@ load_config() {
   CFST_STABILITY_TIMEOUT="${CFST_STABILITY_TIMEOUT:-35}"
   VALIDATE_CURRENT_ROUNDS="${VALIDATE_CURRENT_ROUNDS:-2}"
   CFST_OBSERVE_CRON="${CFST_OBSERVE_CRON:-30 14,20 * * *}"
+  CFST_OBSERVE_MIN_SPEED="${CFST_OBSERVE_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
   CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
   CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
   CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
@@ -1641,6 +1643,61 @@ install_observe_cron_command() {
   printf 'installed_observe_cron=%s\n' "$line"
 }
 
+current_observation_report_command() {
+  [ -s "$OBSERVATION_HISTORY_FILE" ] || die "observation history is empty: $OBSERVATION_HISTORY_FILE"
+  local generated_at
+  generated_at="$(date '+%F %T')"
+  {
+    echo "=== current-observation-report ==="
+    printf 'generated_at=%s\n' "$generated_at"
+    printf 'history_file=%s\n' "$OBSERVATION_HISTORY_FILE"
+    printf 'min_speed_threshold=%s MB/s\n' "$CFST_OBSERVE_MIN_SPEED"
+    echo
+    echo "=== dns ==="
+    print_dns_health
+    echo
+    echo "=== summary_by_ip ==="
+    awk -F '\t' -v threshold="${CFST_OBSERVE_MIN_SPEED:-8}" '
+      NR == 1 {next}
+      $1 != "" && $2 != "" {
+        ip=$2
+        min=$5+0
+        avg=$6+0
+        ok=$7+0
+        count[ip]++
+        if (!(ip in seen)) {
+          first[ip]=$1
+          min_seen[ip]=min
+          max_seen[ip]=min
+          seen_order[++n]=ip
+          seen[ip]=1
+        }
+        last[ip]=$1
+        if (min < min_seen[ip]) min_seen[ip]=min
+        if (min > max_seen[ip]) max_seen[ip]=min
+        sum_min[ip]+=min
+        sum_avg[ip]+=avg
+        if (min < threshold || ok < 1) low[ip]++
+      }
+      END {
+        print "ip\tobservations\tmin_of_min\tavg_of_min\tavg_speed\tlow_count\tstatus\tfirst_seen\tlast_seen"
+        for (i=1; i<=n; i++) {
+          ip=seen_order[i]
+          avg_min=count[ip] ? sum_min[ip]/count[ip] : 0
+          avg_speed=count[ip] ? sum_avg[ip]/count[ip] : 0
+          status="active"
+          if (low[ip] >= 3) status="stale"
+          else if (low[ip] >= 1) status="watch"
+          printf "%s\t%d\t%.2f\t%.2f\t%.2f\t%d\t%s\t%s\t%s\n", ip, count[ip], min_seen[ip], avg_min, avg_speed, low[ip]+0, status, first[ip], last[ip]
+        }
+      }
+    ' "$OBSERVATION_HISTORY_FILE"
+    echo
+    echo "=== recent_observations ==="
+    tail -n 20 "$OBSERVATION_HISTORY_FILE"
+  } | tee "$CURRENT_OBSERVATION_REPORT_FILE"
+}
+
 external_candidate_check_command() {
   mkdir -p "$APP_DIR"
   : > "$EXTERNAL_CANDIDATE_CHECK_FILE"
@@ -1788,6 +1845,7 @@ main() {
     health-check) health_check_command ;;
     validate-current) validate_current_command ;;
     observe-current) observe_current_command ;;
+    current-observation-report) current_observation_report_command ;;
     install-observe-cron) install_observe_cron_command ;;
     external-candidate-check) external_candidate_check_command ;;
     external-observe) external_observe_command ;;
