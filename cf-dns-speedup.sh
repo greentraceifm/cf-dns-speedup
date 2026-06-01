@@ -95,6 +95,7 @@ load_config() {
   CFST_RETAIN_RATIO="${CFST_RETAIN_RATIO:-0.90}"
   CFST_REPLACE_IMPROVE_RATIO="${CFST_REPLACE_IMPROVE_RATIO:-1.25}"
   CFST_DEGRADE_MIN_SPEED="${CFST_DEGRADE_MIN_SPEED:-2}"
+  CFST_RETAIN_MIN_SPEED="${CFST_RETAIN_MIN_SPEED:-8}"
   CFST_FAIL_EVICT_COUNT="${CFST_FAIL_EVICT_COUNT:-3}"
   CFST_FINAL_CANDIDATE_LIMIT="${CFST_FINAL_CANDIDATE_LIMIT:-20}"
   CFST_EXTERNAL_CANDIDATES="${CFST_EXTERNAL_CANDIDATES:-0}"
@@ -138,6 +139,7 @@ normalize_retention_config() {
   CFST_RETAIN_RATIO="$(awk -v v="$CFST_RETAIN_RATIO" 'BEGIN {v+=0; if (v <= 0 || v > 1) v=0.90; printf "%.2f", v}')"
   CFST_REPLACE_IMPROVE_RATIO="$(awk -v v="$CFST_REPLACE_IMPROVE_RATIO" 'BEGIN {v+=0; if (v < 1) v=1.25; printf "%.2f", v}')"
   CFST_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=2; printf "%.2f", v}')"
+  CFST_RETAIN_MIN_SPEED="$(awk -v v="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=8; printf "%.2f", v}')"
 }
 
 normalize_external_candidate_config() {
@@ -772,6 +774,17 @@ cfst_url_host() {
   printf '%s\n' "$CFST_URL" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#/.*##' -e 's#^\[\(.*\)\]$#\1#' -e 's#:[0-9][0-9]*$##'
 }
 
+download_speed_bps() {
+  local host="$1"
+  local ip="$2"
+  curl -L -k -o /dev/null \
+    --connect-timeout "$CFST_STABILITY_CONNECT_TIMEOUT" \
+    --max-time "$CFST_STABILITY_TIMEOUT" \
+    --resolve "$host:$CFST_PORT:$ip" \
+    -w '%{http_code} %{size_download} %{speed_download}' \
+    "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}' || true
+}
+
 current_dns_candidate_rows() {
   [ "${CFST_COMPARE_CURRENT_DNS:-0}" = "1" ] || return 0
   local names qtype
@@ -855,15 +868,20 @@ sort_stability_results() {
   awk -F '\t' \
     -v retain_ratio="${CFST_RETAIN_RATIO:-0.90}" \
     -v replace_ratio="${CFST_REPLACE_IMPROVE_RATIO:-1.25}" \
-    -v degrade_min="${CFST_DEGRADE_MIN_SPEED:-2}" '
+    -v degrade_min="${CFST_DEGRADE_MIN_SPEED:-2}" \
+    -v retain_min="${CFST_RETAIN_MIN_SPEED:-8}" \
+    -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" '
     {
       line[NR]=$0
       min_speed[NR]=$4 + 0
       avg_speed[NR]=$5 + 0
+      ok_rounds[NR]=$6 + 0
       source[NR]=$7
       boost[NR]=1
-      if (source[NR] ~ /(^|,)current_dns(,|$)/ && min_speed[NR] >= degrade_min) boost[NR]=replace_ratio
-      else if (source[NR] ~ /(^|,)champion(,|$)/ && min_speed[NR] >= degrade_min) boost[NR]=1 / retain_ratio
+      stable_enough=(min_speed[NR] >= retain_min && (rounds <= 0 || ok_rounds[NR] >= rounds))
+      if (source[NR] ~ /(^|,)current_dns(,|$)/ && stable_enough) boost[NR]=replace_ratio
+      else if (source[NR] ~ /(^|,)champion(,|$)/ && stable_enough) boost[NR]=1 / retain_ratio
+      else if (min_speed[NR] < degrade_min) boost[NR]=0.5
       score[NR]=min_speed[NR] * boost[NR]
     }
     END {
@@ -930,7 +948,9 @@ update_champion_pool() {
         best=i
         for (j=i+1; j<=candidate_count; j++) {
           a=candidate[j]; b=candidate[best]
-          if (best_min[a] > best_min[b] || (best_min[a] == best_min[b] && recent[a] > recent[b])) best=j
+          score_a=recent[a] > 0 ? recent[a] : best_min[a] * 0.80
+          score_b=recent[b] > 0 ? recent[b] : best_min[b] * 0.80
+          if (score_a > score_b || (score_a == score_b && best_min[a] > best_min[b])) best=j
         }
         tmp=candidate[i]; candidate[i]=candidate[best]; candidate[best]=tmp
       }
@@ -1018,7 +1038,7 @@ update_external_observation_pool() {
       if ($1 == "") next
       ip=$1
       min=$4+0; avg=$5+0; ok=$6+0
-      good=(ok > 0 && min >= min_speed)
+      good=(ok >= rounds && min >= min_speed)
       if (!(ip in seen)) {
         order[++order_count]=ip
         first[ip]=now; best_min[ip]=0; best_avg[ip]=0; recent[ip]=0
@@ -1080,12 +1100,7 @@ run_stability_retest() {
     ok=0
     : > "$raw_file"
     while [ "$round" -le "$CFST_STABILITY_TEST_ROUNDS" ]; do
-      speed_bps="$(curl -L -k -o /dev/null \
-        --connect-timeout "$CFST_STABILITY_CONNECT_TIMEOUT" \
-        --max-time "$CFST_STABILITY_TIMEOUT" \
-        --resolve "$host:$CFST_PORT:$ip" \
-        -w '%{http_code} %{size_download} %{speed_download}' \
-        "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}')"
+      speed_bps="$(download_speed_bps "$host" "$ip")"
       if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
         awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
         ok=$((ok + 1))
@@ -1115,8 +1130,10 @@ run_stability_retest() {
       printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n'
       sort_stability_results < "$sorted_file"
     } > "$STABILITY_RESULT_FILE"
-    update_champion_pool
-    update_external_observation_pool
+    if [ "${CFST_SKIP_POOL_UPDATE:-0}" != "1" ]; then
+      update_champion_pool
+      update_external_observation_pool
+    fi
     log "稳定性复测：完成，已按留任挑战、冠军池、最低速度和平均速度重新排序"
   fi
 }
@@ -1496,6 +1513,8 @@ health_check_command() {
     printf 'CFST_PREFER_MIN_SPEED=%s\n' "$CFST_PREFER_MIN_SPEED"
     printf 'CFST_STABILITY_TEST_COUNT=%s\n' "$CFST_STABILITY_TEST_COUNT"
     printf 'CFST_STABILITY_TEST_ROUNDS=%s\n' "$CFST_STABILITY_TEST_ROUNDS"
+    printf 'CFST_RETAIN_MIN_SPEED=%s\n' "$CFST_RETAIN_MIN_SPEED"
+    printf 'CFST_DEGRADE_MIN_SPEED=%s\n' "$CFST_DEGRADE_MIN_SPEED"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"
@@ -1553,12 +1572,7 @@ validate_current_command() {
     round=1
     ok=0
     while [ "$round" -le "$VALIDATE_CURRENT_ROUNDS" ]; do
-      speed_bps="$(curl -L -k -o /dev/null \
-        --connect-timeout "$CFST_STABILITY_CONNECT_TIMEOUT" \
-        --max-time "$CFST_STABILITY_TIMEOUT" \
-        --resolve "$host:$CFST_PORT:$ip" \
-        -w '%{http_code} %{size_download} %{speed_download}' \
-        "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}')"
+      speed_bps="$(download_speed_bps "$host" "$ip")"
       if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
         awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
         ok=$((ok + 1))
@@ -1609,6 +1623,22 @@ external_candidate_check_command() {
     printf 'accepted_count=%s\n' "$(wc -l < "$EXTERNAL_CANDIDATE_CHECK_FILE" 2>/dev/null | tr -d ' ')"
     head -n 30 "$EXTERNAL_CANDIDATE_CHECK_FILE" 2>/dev/null || true
   }
+}
+
+stability_verify_command() {
+  acquire_lock
+  rotate_logs
+  RUN_STARTED_AT="$(date '+%F %T')"
+  RUN_STATUS="running"
+  RUN_ERROR=""
+  [ -s "$RESULT_FILE" ] || die "result.csv missing; cannot run stability verification"
+  CFST_SKIP_POOL_UPDATE=1
+  log "稳定性验证：复用现有 result.csv，只复测候选并重排；不停止代理、不更新 DNS、不发送通知"
+  run_stability_retest
+  [ -s "$STABILITY_RESULT_FILE" ] || die "stability verification did not produce results"
+  show_best_ips
+  RUN_STATUS="success"
+  log "稳定性验证完成；如结果满意，可再执行 stability-update 或 run 进行实际更新"
 }
 
 stability_update_command() {
@@ -1718,6 +1748,7 @@ main() {
     external-observe) external_observe_command ;;
     observation-report) observation_report_command ;;
     stability-update) stability_update_command ;;
+    stability-verify) stability_verify_command ;;
     delete-records) delete_records_command ;;
     *) die "未知命令：$1" ;;
   esac
