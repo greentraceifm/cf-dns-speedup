@@ -7,8 +7,10 @@ CFST_BIN="${CFST_BIN:-$APP_DIR/cfst}"
 IP_FILE="${IP_FILE:-$APP_DIR/ip.txt}"
 RESULT_FILE="${RESULT_FILE:-$APP_DIR/result.csv}"
 STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
+STABILITY_VERIFY_RESULT_FILE="${STABILITY_VERIFY_RESULT_FILE:-$APP_DIR/result.stability.verify.tsv}"
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
+OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
 EXTERNAL_OBSERVATION_POOL_FILE="${EXTERNAL_OBSERVATION_POOL_FILE:-$APP_DIR/external-observation-pool.tsv}"
 EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
@@ -89,6 +91,7 @@ load_config() {
   CFST_STABILITY_CONNECT_TIMEOUT="${CFST_STABILITY_CONNECT_TIMEOUT:-6}"
   CFST_STABILITY_TIMEOUT="${CFST_STABILITY_TIMEOUT:-35}"
   VALIDATE_CURRENT_ROUNDS="${VALIDATE_CURRENT_ROUNDS:-2}"
+  CFST_OBSERVE_CRON="${CFST_OBSERVE_CRON:-30 14,20 * * *}"
   CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
   CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
   CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
@@ -96,8 +99,9 @@ load_config() {
   CFST_REPLACE_IMPROVE_RATIO="${CFST_REPLACE_IMPROVE_RATIO:-1.25}"
   CFST_DEGRADE_MIN_SPEED="${CFST_DEGRADE_MIN_SPEED:-2}"
   CFST_RETAIN_MIN_SPEED="${CFST_RETAIN_MIN_SPEED:-8}"
+  CFST_CHAMPION_FAIL_MIN_SPEED="${CFST_CHAMPION_FAIL_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
   CFST_FAIL_EVICT_COUNT="${CFST_FAIL_EVICT_COUNT:-3}"
-  CFST_FINAL_CANDIDATE_LIMIT="${CFST_FINAL_CANDIDATE_LIMIT:-20}"
+  CFST_FINAL_CANDIDATE_LIMIT="${CFST_FINAL_CANDIDATE_LIMIT:-30}"
   CFST_EXTERNAL_CANDIDATES="${CFST_EXTERNAL_CANDIDATES:-0}"
   CFST_EXTERNAL_CANDIDATE_URLS="${CFST_EXTERNAL_CANDIDATE_URLS:-}"
   CFST_EXTERNAL_CANDIDATE_LIMIT="${CFST_EXTERNAL_CANDIDATE_LIMIT:-5000}"
@@ -135,11 +139,12 @@ load_config() {
 normalize_retention_config() {
   CFST_CHAMPION_POOL_SIZE="$(awk -v v="$CFST_CHAMPION_POOL_SIZE" 'BEGIN {v+=0; if (v < 1) v=10; print int(v)}')"
   CFST_FAIL_EVICT_COUNT="$(awk -v v="$CFST_FAIL_EVICT_COUNT" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
-  CFST_FINAL_CANDIDATE_LIMIT="$(awk -v v="$CFST_FINAL_CANDIDATE_LIMIT" 'BEGIN {v+=0; if (v < 1) v=20; print int(v)}')"
+  CFST_FINAL_CANDIDATE_LIMIT="$(awk -v v="$CFST_FINAL_CANDIDATE_LIMIT" 'BEGIN {v+=0; if (v < 1) v=30; print int(v)}')"
   CFST_RETAIN_RATIO="$(awk -v v="$CFST_RETAIN_RATIO" 'BEGIN {v+=0; if (v <= 0 || v > 1) v=0.90; printf "%.2f", v}')"
   CFST_REPLACE_IMPROVE_RATIO="$(awk -v v="$CFST_REPLACE_IMPROVE_RATIO" 'BEGIN {v+=0; if (v < 1) v=1.25; printf "%.2f", v}')"
   CFST_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=2; printf "%.2f", v}')"
   CFST_RETAIN_MIN_SPEED="$(awk -v v="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=8; printf "%.2f", v}')"
+  CFST_CHAMPION_FAIL_MIN_SPEED="$(awk -v v="$CFST_CHAMPION_FAIL_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
 }
 
 normalize_external_candidate_config() {
@@ -914,7 +919,7 @@ update_champion_pool() {
   old="$APP_DIR/champion-pool.old.tsv"
   now="$(date '+%F %T')"
   [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\n' > "$old"
-  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" '
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" '
     FNR == NR {
       if (FNR > 1 && $1 != "") {
         ip=$1; best_min[ip]=$2+0; best_avg[ip]=$3+0; recent[ip]=$4+0; fail[ip]=$5+0; first[ip]=$6; last[ip]=$7; source[ip]=$8
@@ -923,7 +928,7 @@ update_champion_pool() {
       next
     }
     FNR > 1 && $1 != "" {
-      ip=$1; min=$4+0; avg=$5+0
+      ip=$1; min=$4+0; avg=$5+0; ok=$6+0
       if (!(ip in seen)) {
         order[++order_count]=ip; first[ip]=now; best_min[ip]=min; best_avg[ip]=avg; fail[ip]=0; source[ip]=$7; seen[ip]=1
       }
@@ -932,7 +937,7 @@ update_champion_pool() {
       if (avg > best_avg[ip]) best_avg[ip]=avg
       if (source[ip] == "") source[ip]=$7
       else if (source[ip] !~ "(^|,)" $7 "(,|$)") source[ip]=source[ip] "," $7
-      if (min < degrade) fail[ip]++
+      if (min < degrade || min < champion_fail || (rounds > 0 && ok < rounds)) fail[ip]++
       else fail[ip]=0
     }
     END {
@@ -1546,9 +1551,7 @@ health_check_command() {
   } | tee "$HEALTH_REPORT_FILE"
 }
 
-validate_current_command() {
-  acquire_lock
-
+validate_current_impl() {
   [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot validate current IPs"
   command -v curl >/dev/null 2>&1 || die "curl is required"
   local host
@@ -1557,9 +1560,9 @@ validate_current_command() {
 
   local candidates
   candidates="$APP_DIR/validate-current.candidates.tsv"
-  selected_result_rows | head -n "$CFST_RESULT_COUNT" > "$candidates"
+  current_dns_candidate_rows | awk -F '\t' '{print $1 "\t" ($2 + 0) "\t" ($3 + 0)}' | head -n "$CFST_RESULT_COUNT" > "$candidates"
   if [ ! -s "$candidates" ]; then
-    current_dns_candidate_rows | awk -F '\t' '{print $1 "\t" ($2 + 0) "\t" ($3 + 0)}' | head -n "$CFST_RESULT_COUNT" > "$candidates"
+    selected_result_rows | head -n "$CFST_RESULT_COUNT" > "$candidates"
   fi
   [ -s "$candidates" ] || die "no selected IPs to validate"
 
@@ -1599,6 +1602,45 @@ validate_current_command() {
   cat "$VALIDATE_RESULT_FILE"
 }
 
+validate_current_command() {
+  acquire_lock
+  validate_current_impl
+}
+
+observe_current_command() {
+  acquire_lock
+  local ts
+  ts="$(date '+%F %T')"
+
+  validate_current_impl
+
+  if [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
+    printf 'observed_at\tip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$OBSERVATION_HISTORY_FILE"
+  fi
+  awk -F '\t' -v ts="$ts" 'NR > 1 && $1 != "" {print ts "\t" $0}' "$VALIDATE_RESULT_FILE" >> "$OBSERVATION_HISTORY_FILE"
+
+  echo
+  echo "=== dns ==="
+  print_dns_health
+  echo
+  echo "=== services ==="
+  print_service_health
+  echo
+  printf 'observation_history=%s\n' "$OBSERVATION_HISTORY_FILE"
+}
+
+install_observe_cron_command() {
+  local schedule line tmp
+  schedule="$CFST_OBSERVE_CRON"
+  line="$schedule cd $APP_DIR && /usr/bin/env bash ./cf-dns-speedup.sh observe-current >>/tmp/cf-dns-speedup.observe.log 2>&1"
+  tmp="/tmp/cf-dns-speedup-cron.$$"
+  crontab -l 2>/dev/null | grep -v 'cf-dns-speedup.sh observe-current' > "$tmp" || true
+  printf '%s\n' "$line" >> "$tmp"
+  crontab "$tmp"
+  rm -f "$tmp"
+  printf 'installed_observe_cron=%s\n' "$line"
+}
+
 external_candidate_check_command() {
   mkdir -p "$APP_DIR"
   : > "$EXTERNAL_CANDIDATE_CHECK_FILE"
@@ -1633,6 +1675,7 @@ stability_verify_command() {
   RUN_ERROR=""
   [ -s "$RESULT_FILE" ] || die "result.csv missing; cannot run stability verification"
   CFST_SKIP_POOL_UPDATE=1
+  STABILITY_RESULT_FILE="$STABILITY_VERIFY_RESULT_FILE"
   log "稳定性验证：复用现有 result.csv，只复测候选并重排；不停止代理、不更新 DNS、不发送通知"
   run_stability_retest
   [ -s "$STABILITY_RESULT_FILE" ] || die "stability verification did not produce results"
@@ -1744,6 +1787,8 @@ main() {
     run) run_once ;;
     health-check) health_check_command ;;
     validate-current) validate_current_command ;;
+    observe-current) observe_current_command ;;
+    install-observe-cron) install_observe_cron_command ;;
     external-candidate-check) external_candidate_check_command ;;
     external-observe) external_observe_command ;;
     observation-report) observation_report_command ;;
