@@ -94,6 +94,10 @@ load_config() {
   VALIDATE_CURRENT_ROUNDS="${VALIDATE_CURRENT_ROUNDS:-2}"
   CFST_OBSERVE_CRON="${CFST_OBSERVE_CRON:-30 14,20 * * *}"
   CFST_OBSERVE_MIN_SPEED="${CFST_OBSERVE_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
+  CFST_PRIMARY_SAFE_MODE="${CFST_PRIMARY_SAFE_MODE:-1}"
+  CFST_PRIMARY_MIN_SPEED="${CFST_PRIMARY_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
+  CFST_PRIMARY_PREFER_REGEX="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}"
+  CFST_PRIMARY_AVOID_REGEX="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}"
   CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
   CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
   CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
@@ -147,6 +151,7 @@ normalize_retention_config() {
   CFST_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=2; printf "%.2f", v}')"
   CFST_RETAIN_MIN_SPEED="$(awk -v v="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=8; printf "%.2f", v}')"
   CFST_CHAMPION_FAIL_MIN_SPEED="$(awk -v v="$CFST_CHAMPION_FAIL_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
+  CFST_PRIMARY_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
 }
 
 normalize_external_candidate_config() {
@@ -909,6 +914,52 @@ sort_stability_results() {
   '
 }
 
+promote_primary_safe_candidate() {
+  if [ "${CFST_PRIMARY_SAFE_MODE:-1}" != "1" ] || [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
+    cat
+    return 0
+  fi
+
+  awk -F '\t' \
+    -v obs_file="$OBSERVATION_HISTORY_FILE" \
+    -v min_speed="${CFST_PRIMARY_MIN_SPEED:-8}" \
+    -v prefer_regex="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}" \
+    -v avoid_regex="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+    BEGIN {
+      while ((getline row < obs_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "observed_at" || f[2] == "") continue
+        ip=f[2]
+        count[ip]++
+        if ((f[5]+0) < min_speed || (f[7]+0) < 1) low[ip]++
+      }
+      close(obs_file)
+    }
+    $1 != "" {
+      line[++n]=$0
+      ip[n]=$1
+      speed[n]=$4+0
+      active=(count[$1] > 0 && low[$1] == 0 && speed[n] >= min_speed)
+      if (active && $1 ~ prefer_regex) {
+        if (best_prefer == 0 || speed[n] > speed[best_prefer]) best_prefer=n
+      } else if (active && $1 !~ avoid_regex) {
+        if (best_neutral == 0 || speed[n] > speed[best_neutral]) best_neutral=n
+      } else if (active) {
+        if (best_avoid == 0 || speed[n] > speed[best_avoid]) best_avoid=n
+      }
+    }
+    END {
+      pick=best_prefer ? best_prefer : (best_neutral ? best_neutral : best_avoid)
+      if (pick == 0 || pick == 1) {
+        for (i=1; i<=n; i++) print line[i]
+      } else {
+        print line[pick]
+        for (i=1; i<=n; i++) if (i != pick) print line[i]
+      }
+    }
+  '
+}
+
 update_champion_pool() {
   [ "${CFST_CHAMPION_POOL:-0}" = "1" ] || return 0
   if [ "${CFST_EXTERNAL_CANDIDATES:-0}" = "1" ] && [ "${CFST_EXTERNAL_CANDIDATES_ALLOW_CHAMPION:-0}" != "1" ]; then
@@ -1135,7 +1186,7 @@ run_stability_retest() {
   if [ -s "$sorted_file" ]; then
     {
       printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n'
-      sort_stability_results < "$sorted_file"
+      sort_stability_results < "$sorted_file" | promote_primary_safe_candidate
     } > "$STABILITY_RESULT_FILE"
     if [ "${CFST_SKIP_POOL_UPDATE:-0}" != "1" ]; then
       update_champion_pool
