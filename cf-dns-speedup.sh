@@ -105,6 +105,11 @@ load_config() {
   CFST_STABLE_SLOT_AVOID_REGEX="${CFST_STABLE_SLOT_AVOID_REGEX:-$CFST_PRIMARY_AVOID_REGEX}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
+  CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
+  CFST_COMPETITIVE_SLOT_COUNT="${CFST_COMPETITIVE_SLOT_COUNT:-2}"
+  CFST_OBSERVATION_RECENT_WINDOW="${CFST_OBSERVATION_RECENT_WINDOW:-2}"
+  CFST_OBSERVATION_STALE_LOW_COUNT="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}"
+  CFST_OBSERVATION_STABLE_MAX_LOW_COUNT="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}"
   CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
   CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
   CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
@@ -166,6 +171,10 @@ normalize_slot_config() {
   CFST_STABLE_SLOT_COUNT="$(awk -v v="$CFST_STABLE_SLOT_COUNT" -v limit="$CFST_RESULT_COUNT" 'BEGIN {v+=0; limit+=0; if (v < 0) v=0; if (limit > 0 && v > limit) v=limit; print int(v)}')"
   CFST_STABLE_SLOT_MIN_SPEED="$(awk -v v="$CFST_STABLE_SLOT_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="$(awk -v v="$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" -v fallback="$CFST_STABLE_SLOT_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
+  CFST_COMPETITIVE_SLOT_COUNT="$(awk -v v="$CFST_COMPETITIVE_SLOT_COUNT" -v limit="$CFST_RESULT_COUNT" 'BEGIN {v+=0; limit+=0; if (v < 0) v=0; if (limit > 0 && v > limit) v=limit; print int(v)}')"
+  CFST_OBSERVATION_RECENT_WINDOW="$(awk -v v="$CFST_OBSERVATION_RECENT_WINDOW" 'BEGIN {v+=0; if (v < 1) v=2; print int(v)}')"
+  CFST_OBSERVATION_STALE_LOW_COUNT="$(awk -v v="$CFST_OBSERVATION_STALE_LOW_COUNT" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
+  CFST_OBSERVATION_STABLE_MAX_LOW_COUNT="$(awk -v v="$CFST_OBSERVATION_STABLE_MAX_LOW_COUNT" 'BEGIN {v+=0; if (v < 0) v=1; print int(v)}')"
 }
 
 normalize_external_candidate_config() {
@@ -288,6 +297,9 @@ write_run_summary() {
     echo "cfst_stable_slot_min_speed=$CFST_STABLE_SLOT_MIN_SPEED"
     echo "cfst_observation_candidates=$CFST_OBSERVATION_CANDIDATES"
     echo "cfst_observation_candidate_min_speed=$CFST_OBSERVATION_CANDIDATE_MIN_SPEED"
+    echo "cfst_dual_pool_mode=$CFST_DUAL_POOL_MODE"
+    echo "cfst_competitive_slot_count=$CFST_COMPETITIVE_SLOT_COUNT"
+    echo "cfst_observation_stale_low_count=$CFST_OBSERVATION_STALE_LOW_COUNT"
     echo "stability_result_file=$STABILITY_RESULT_FILE"
     echo "stability_result_updated_at=$stability_updated_at"
     echo "dry_run=$DRY_RUN"
@@ -316,6 +328,9 @@ write_run_summary() {
     printf '  "cfst_stable_slot_min_speed": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_MIN_SPEED" | json_escape)"
     printf '  "cfst_observation_candidates": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATES" | json_escape)"
     printf '  "cfst_observation_candidate_min_speed": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" | json_escape)"
+    printf '  "cfst_dual_pool_mode": %s,\n' "$(printf '%s' "$CFST_DUAL_POOL_MODE" | json_escape)"
+    printf '  "cfst_competitive_slot_count": %s,\n' "$(printf '%s' "$CFST_COMPETITIVE_SLOT_COUNT" | json_escape)"
+    printf '  "cfst_observation_stale_low_count": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_STALE_LOW_COUNT" | json_escape)"
     printf '  "stability_result_file": %s,\n' "$(printf '%s' "$STABILITY_RESULT_FILE" | json_escape)"
     printf '  "stability_result_updated_at": %s,\n' "$(printf '%s' "$stability_updated_at" | json_escape)"
     printf '  "dry_run": %s,\n' "$(printf '%s' "$DRY_RUN" | json_escape)"
@@ -963,6 +978,121 @@ sort_stability_results() {
   '
 }
 
+apply_dual_pool_slots() {
+  if [ "${CFST_DUAL_POOL_MODE:-1}" != "1" ] || [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
+    cat
+    return 0
+  fi
+
+  awk -F '\t' \
+    -v obs_file="$OBSERVATION_HISTORY_FILE" \
+    -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v result_count="${CFST_RESULT_COUNT:-5}" \
+    -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" \
+    -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" \
+    -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
+    -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" \
+    -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" \
+    -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
+    -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" '
+    function add_pick(idx) {
+      if (idx <= 0 || picked[idx] || emitted >= result_count) return
+      picked[idx]=1
+      print line[idx]
+      emitted++
+    }
+    function add_group(arr, count, limit, i) {
+      for (i=1; i<=count && emitted<limit; i++) add_pick(arr[i])
+    }
+    function classify(ip, recent_start, recent_lows) {
+      if (obs_count[ip] == 0) return "challenger"
+      recent_start=obs_count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      recent_lows=0
+      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < min_speed || obs_ok[ip,k] < 1) recent_lows++
+      if (obs_low[ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
+      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= min_speed && obs_recent_ok[ip] >= 1) return "stable"
+      return "watch"
+    }
+    function stable_score(idx, health, score) {
+      health=health_status[idx]
+      score=(obs_avg_min[ip[idx]] * 0.60) + (current_min[idx] * 0.30) + (cfst_speed[idx] * 0.10)
+      if (health == "stable") score += 20
+      else if (health == "watch") score += 5
+      else if (health == "stale") score -= 1000
+      else score -= 10
+      if (ip[idx] ~ prefer_regex) score += 2
+      if (ip[idx] ~ avoid_regex) score -= 5
+      return score
+    }
+    function competitive_score(idx, health, score) {
+      health=health_status[idx]
+      score=(current_min[idx] * 0.60) + (cfst_speed[idx] * 0.30) + (obs_avg_min[ip[idx]] * 0.10)
+      if (health == "stale") score -= 100
+      if (ip[idx] ~ avoid_regex) score -= 1
+      return score
+    }
+    BEGIN {
+      while ((getline row < obs_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "observed_at" || f[2] == "") continue
+        ip0=f[2]
+        obs_count[ip0]++
+        idx=obs_count[ip0]
+        obs_min[ip0,idx]=f[5]+0
+        obs_ok[ip0,idx]=f[7]+0
+        obs_recent_min[ip0]=f[5]+0
+        obs_recent_ok[ip0]=f[7]+0
+        obs_sum_min[ip0]+=f[5]+0
+        obs_avg_min[ip0]=obs_sum_min[ip0] / obs_count[ip0]
+        if ((f[5]+0) < min_speed || (f[7]+0) < 1) obs_low[ip0]++
+      }
+      close(obs_file)
+    }
+    $1 != "" {
+      line[++n]=$0
+      ip[n]=$1
+      latency[n]=$2+0
+      cfst_speed[n]=$3+0
+      current_min[n]=$4+0
+      avg_speed[n]=$5+0
+      ok_rounds[n]=$6+0
+      source[n]=$7
+      enough_rounds=(rounds <= 0 || ok_rounds[n] >= rounds)
+      health_status[n]=classify(ip[n])
+      stable_rank[n]=stable_score(n)
+      competitive_rank[n]=competitive_score(n)
+      if (current_min[n] >= min_speed && enough_rounds && health_status[n] == "stable") stable[++stable_count]=n
+      else if (current_min[n] >= min_speed && enough_rounds && health_status[n] == "watch") watch[++watch_count]=n
+      else if (health_status[n] != "stale") competitive[++competitive_count]=n
+      else stale[++stale_count]=n
+    }
+    END {
+      for (i=1; i<=stable_count; i++) {
+        best=i
+        for (j=i+1; j<=stable_count; j++) if (stable_rank[stable[j]] > stable_rank[stable[best]]) best=j
+        tmp=stable[i]; stable[i]=stable[best]; stable[best]=tmp
+      }
+      for (i=1; i<=watch_count; i++) {
+        best=i
+        for (j=i+1; j<=watch_count; j++) if (stable_rank[watch[j]] > stable_rank[watch[best]]) best=j
+        tmp=watch[i]; watch[i]=watch[best]; watch[best]=tmp
+      }
+      for (i=1; i<=competitive_count; i++) {
+        best=i
+        for (j=i+1; j<=competitive_count; j++) if (competitive_rank[competitive[j]] > competitive_rank[competitive[best]]) best=j
+        tmp=competitive[i]; competitive[i]=competitive[best]; competitive[best]=tmp
+      }
+      add_group(stable, stable_count, stable_slots)
+      add_group(watch, watch_count, stable_slots)
+      add_group(competitive, competitive_count, result_count)
+      add_group(stable, stable_count, result_count)
+      add_group(watch, watch_count, result_count)
+      for (i=1; i<=n && emitted<result_count; i++) add_pick(i)
+    }
+  '
+}
+
 promote_primary_safe_candidate() {
   if [ "${CFST_PRIMARY_SAFE_MODE:-1}" != "1" ] || [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
     cat
@@ -1072,8 +1202,46 @@ update_champion_pool() {
   tmp="$APP_DIR/champion-pool.tmp"
   old="$APP_DIR/champion-pool.old.tsv"
   now="$(date '+%F %T')"
-  [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\n' > "$old"
-  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" '
+  [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\n' > "$old"
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+    function classify(ip, recent_start, recent_lows) {
+      if (obs_count[ip] == 0) return "challenger"
+      recent_start=obs_count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      recent_lows=0
+      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < min_speed || obs_ok[ip,k] < 1) recent_lows++
+      recent_low[ip]=recent_lows
+      if (obs_low[ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
+      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= min_speed && obs_recent_ok[ip] >= 1) return "stable"
+      return "watch"
+    }
+    function compute_stable_score(ip, score) {
+      score=(obs_avg_min[ip] * 0.60) + (recent[ip] * 0.30) + (best_min[ip] * 0.10)
+      if (health[ip] == "stable") score += 20
+      else if (health[ip] == "watch") score += 5
+      else if (health[ip] == "stale") score -= 1000
+      else score -= 10
+      if (ip ~ prefer_regex) score += 2
+      if (ip ~ avoid_regex) score -= 5
+      return score
+    }
+    BEGIN {
+      while ((getline row < obs_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "observed_at" || f[2] == "") continue
+        ip=f[2]
+        obs_count[ip]++
+        idx=obs_count[ip]
+        obs_min[ip,idx]=f[5]+0
+        obs_ok[ip,idx]=f[7]+0
+        obs_recent_min[ip]=f[5]+0
+        obs_recent_ok[ip]=f[7]+0
+        obs_sum_min[ip]+=f[5]+0
+        obs_avg_min[ip]=obs_sum_min[ip] / obs_count[ip]
+        if ((f[5]+0) < min_speed || (f[7]+0) < 1) obs_low[ip]++
+      }
+      close(obs_file)
+    }
     FNR == NR {
       if (FNR > 1 && $1 != "") {
         ip=$1; best_min[ip]=$2+0; best_avg[ip]=$3+0; recent[ip]=$4+0; fail[ip]=$5+0; first[ip]=$6; last[ip]=$7; source[ip]=$8
@@ -1091,31 +1259,35 @@ update_champion_pool() {
       if (avg > best_avg[ip]) best_avg[ip]=avg
       if (source[ip] == "") source[ip]=$7
       else if (source[ip] !~ "(^|,)" $7 "(,|$)") source[ip]=source[ip] "," $7
-      if (min < degrade || min < champion_fail || (rounds > 0 && ok < rounds)) fail[ip]++
+      health[ip]=classify(ip)
+      if (health[ip] == "stale" || min < degrade || min < champion_fail || (rounds > 0 && ok < rounds)) fail[ip]++
       else fail[ip]=0
     }
     END {
-      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource"
+      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type"
       for (i=1; i<=order_count; i++) {
         ip=order[i]
         if (printed_seen[ip]) continue
         printed_seen[ip]=1
         if (fail[ip] >= evict) continue
+        if (health[ip] == "") health[ip]=classify(ip)
+        stable_score[ip]=compute_stable_score(ip)
+        pool_type[ip]=(health[ip] == "stable" || health[ip] == "watch") ? "stable" : "competitive"
         candidate[++candidate_count]=ip
       }
       for (i=1; i<=candidate_count; i++) {
         best=i
         for (j=i+1; j<=candidate_count; j++) {
           a=candidate[j]; b=candidate[best]
-          score_a=recent[a] > 0 ? recent[a] : best_min[a] * 0.80
-          score_b=recent[b] > 0 ? recent[b] : best_min[b] * 0.80
+          score_a=stable_score[a]
+          score_b=stable_score[b]
           if (score_a > score_b || (score_a == score_b && best_min[a] > best_min[b])) best=j
         }
         tmp=candidate[i]; candidate[i]=candidate[best]; candidate[best]=tmp
       }
       for (i=1; i<=candidate_count && i<=size; i++) {
         ip=candidate[i]
-        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" fail[ip] "\t" first[ip] "\t" last[ip] "\t" source[ip]
+        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" fail[ip] "\t" first[ip] "\t" last[ip] "\t" source[ip] "\t" health[ip] "\t" stable_score[ip] "\t" recent_low[ip]+0 "\t" pool_type[ip]
       }
     }
   ' "$old" "$STABILITY_RESULT_FILE" > "$tmp"
@@ -1287,7 +1459,7 @@ run_stability_retest() {
   if [ -s "$sorted_file" ]; then
     {
       printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n'
-      sort_stability_results < "$sorted_file" | promote_primary_safe_candidate | promote_stable_slots
+      sort_stability_results < "$sorted_file" | apply_dual_pool_slots | promote_primary_safe_candidate | promote_stable_slots
     } > "$STABILITY_RESULT_FILE"
     if [ "${CFST_SKIP_POOL_UPDATE:-0}" != "1" ]; then
       update_champion_pool
