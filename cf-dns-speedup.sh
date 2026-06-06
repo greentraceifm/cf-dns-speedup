@@ -13,6 +13,7 @@ VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.t
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
+CHAMPION_LIFECYCLE_AUDIT_FILE="${CHAMPION_LIFECYCLE_AUDIT_FILE:-$APP_DIR/champion-lifecycle-audit.tsv}"
 EXTERNAL_OBSERVATION_POOL_FILE="${EXTERNAL_OBSERVATION_POOL_FILE:-$APP_DIR/external-observation-pool.tsv}"
 EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
 EXTERNAL_CANDIDATE_REPORT_FILE="${EXTERNAL_CANDIDATE_REPORT_FILE:-$APP_DIR/external-candidates.report.txt}"
@@ -1202,8 +1203,9 @@ update_champion_pool() {
   tmp="$APP_DIR/champion-pool.tmp"
   old="$APP_DIR/champion-pool.old.tsv"
   now="$(date '+%F %T')"
-  [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\n' > "$old"
-  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+  [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\tlifecycle_state\tlifecycle_reason\tobservation_count\tconsecutive_passes\tconsecutive_lows\tpromotion_ready\n' > "$old"
+  [ -s "$CHAMPION_LIFECYCLE_AUDIT_FILE" ] || printf 'observed_at\tip\taction\thealth_status\tfail_count\tstable_score\tlifecycle_reason\n' > "$CHAMPION_LIFECYCLE_AUDIT_FILE"
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v audit_file="$CHAMPION_LIFECYCLE_AUDIT_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
     function classify(ip, recent_start, recent_lows) {
       if (obs_count[ip] == 0) return "challenger"
       recent_start=obs_count[ip] - recent_window + 1
@@ -1224,6 +1226,38 @@ update_champion_pool() {
       if (ip ~ prefer_regex) score += 2
       if (ip ~ avoid_regex) score -= 5
       return score
+    }
+    function pass_ok(ip, idx) {
+      return obs_min[ip,idx] >= min_speed && obs_ok[ip,idx] >= 1
+    }
+    function consecutive_passes(ip, idx, count) {
+      for (idx=obs_count[ip]; idx>=1; idx--) {
+        if (!pass_ok(ip, idx)) break
+        count++
+      }
+      return count + 0
+    }
+    function consecutive_lows(ip, idx, count) {
+      for (idx=obs_count[ip]; idx>=1; idx--) {
+        if (pass_ok(ip, idx)) break
+        count++
+      }
+      return count + 0
+    }
+    function lifecycle_state(ip) {
+      if (health[ip] == "stable") return "stable"
+      if (health[ip] == "watch") return "watch"
+      if (health[ip] == "stale") return "stale"
+      return "challenger"
+    }
+    function lifecycle_reason(ip) {
+      if (health[ip] == "stable") return "recent_observation_passed;low_count_within_limit"
+      if (health[ip] == "watch") return "observation_present;not_yet_stable"
+      if (health[ip] == "stale") return "low_speed_or_failed_observation"
+      return "no_observation_history_yet"
+    }
+    function promotion_ready(ip) {
+      return health[ip] == "stable" && consecutive_pass[ip] >= recent_window && recent[ip] >= min_speed
     }
     BEGIN {
       while ((getline row < obs_file) > 0) {
@@ -1264,7 +1298,7 @@ update_champion_pool() {
       else fail[ip]=0
     }
     END {
-      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type"
+      print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\tlifecycle_state\tlifecycle_reason\tobservation_count\tconsecutive_passes\tconsecutive_lows\tpromotion_ready"
       for (i=1; i<=order_count; i++) {
         ip=order[i]
         if (printed_seen[ip]) continue
@@ -1273,6 +1307,8 @@ update_champion_pool() {
         if (health[ip] == "") health[ip]=classify(ip)
         stable_score[ip]=compute_stable_score(ip)
         pool_type[ip]=(health[ip] == "stable" || health[ip] == "watch") ? "stable" : "competitive"
+        consecutive_pass[ip]=consecutive_passes(ip)
+        consecutive_low[ip]=consecutive_lows(ip)
         candidate[++candidate_count]=ip
       }
       for (i=1; i<=candidate_count; i++) {
@@ -1287,7 +1323,18 @@ update_champion_pool() {
       }
       for (i=1; i<=candidate_count && i<=size; i++) {
         ip=candidate[i]
-        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" fail[ip] "\t" first[ip] "\t" last[ip] "\t" source[ip] "\t" health[ip] "\t" stable_score[ip] "\t" recent_low[ip]+0 "\t" pool_type[ip]
+        state=lifecycle_state(ip)
+        reason=lifecycle_reason(ip)
+        ready=promotion_ready(ip) ? 1 : 0
+        print ip "\t" best_min[ip] "\t" best_avg[ip] "\t" recent[ip] "\t" fail[ip] "\t" first[ip] "\t" last[ip] "\t" source[ip] "\t" health[ip] "\t" stable_score[ip] "\t" recent_low[ip]+0 "\t" pool_type[ip] "\t" state "\t" reason "\t" obs_count[ip]+0 "\t" consecutive_pass[ip]+0 "\t" consecutive_low[ip]+0 "\t" ready
+      }
+      for (i=1; i<=order_count; i++) {
+        ip=order[i]
+        if (fail[ip] >= evict) {
+          if (health[ip] == "") health[ip]=classify(ip)
+          stable_score[ip]=compute_stable_score(ip)
+          print now "\t" ip "\tevicted\t" health[ip] "\t" fail[ip] "\t" stable_score[ip] "\t" lifecycle_reason(ip) >> audit_file
+        }
       }
     }
   ' "$old" "$STABILITY_RESULT_FILE" > "$tmp"
