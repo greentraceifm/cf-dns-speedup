@@ -14,6 +14,7 @@ OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-histo
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
 CHAMPION_LIFECYCLE_AUDIT_FILE="${CHAMPION_LIFECYCLE_AUDIT_FILE:-$APP_DIR/champion-lifecycle-audit.tsv}"
+CHAMPION_REPORT_FILE="${CHAMPION_REPORT_FILE:-$APP_DIR/champion-report.latest.txt}"
 EXTERNAL_OBSERVATION_POOL_FILE="${EXTERNAL_OBSERVATION_POOL_FILE:-$APP_DIR/external-observation-pool.tsv}"
 EXTERNAL_CANDIDATE_CHECK_FILE="${EXTERNAL_CANDIDATE_CHECK_FILE:-$APP_DIR/external-candidates.check.txt}"
 EXTERNAL_CANDIDATE_REPORT_FILE="${EXTERNAL_CANDIDATE_REPORT_FILE:-$APP_DIR/external-candidates.report.txt}"
@@ -2194,6 +2195,85 @@ observation_report_command() {
   }
 }
 
+champion_report_command() {
+  if [ ! -s "$CHAMPION_POOL_FILE" ]; then
+    echo "champion pool is empty: $CHAMPION_POOL_FILE"
+    return 0
+  fi
+  local generated_at
+  generated_at="$(date '+%F %T')"
+  {
+    echo "=== champion-report ==="
+    printf 'generated_at=%s\n' "$generated_at"
+    printf 'champion_pool_file=%s\n' "$CHAMPION_POOL_FILE"
+    printf 'lifecycle_audit_file=%s\n' "$CHAMPION_LIFECYCLE_AUDIT_FILE"
+    printf 'stable_threshold=%s MB/s\n' "$CFST_STABLE_SLOT_MIN_SPEED"
+    printf 'evict_fail_count=%s\n' "$CFST_FAIL_EVICT_COUNT"
+    echo
+    echo "=== summary ==="
+    awk -F '\t' '
+      NR == 1 {next}
+      $1 != "" {
+        total++
+        health=$9 == "" ? "unknown" : $9
+        pool=$12 == "" ? "unknown" : $12
+        ready=$18 == "" ? "0" : $18
+        health_count[health]++
+        pool_count[pool]++
+        if (ready == "1") ready_count++
+        if (($5+0) > 0) failing_count++
+      }
+      END {
+        printf "total=%d\n", total+0
+        printf "stable=%d\n", health_count["stable"]+0
+        printf "watch=%d\n", health_count["watch"]+0
+        printf "challenger=%d\n", health_count["challenger"]+0
+        printf "stale=%d\n", health_count["stale"]+0
+        printf "promotion_ready=%d\n", ready_count+0
+        printf "with_fail_count=%d\n", failing_count+0
+        printf "stable_pool=%d\n", pool_count["stable"]+0
+        printf "competitive_pool=%d\n", pool_count["competitive"]+0
+      }
+    ' "$CHAMPION_POOL_FILE"
+    echo
+    echo "=== promotion_ready ==="
+    awk -F '\t' 'NR == 1 || $18 == "1" {print}' "$CHAMPION_POOL_FILE"
+    echo
+    echo "=== watch_or_stale ==="
+    awk -F '\t' 'NR == 1 || $9 == "watch" || $9 == "stale" || ($5+0) > 0 {print}' "$CHAMPION_POOL_FILE"
+    echo
+    echo "=== top_by_stable_score ==="
+    awk -F '\t' '
+      NR == 1 {header=$0; next}
+      $1 != "" {
+        line[++n]=$0
+        score[n]=$10+0
+        best[n]=$2+0
+      }
+      END {
+        print header
+        for (i=1; i<=n; i++) {
+          pick=i
+          for (j=i+1; j<=n; j++) {
+            if (score[j] > score[pick] || (score[j] == score[pick] && best[j] > best[pick])) pick=j
+          }
+          tmp=line[i]; line[i]=line[pick]; line[pick]=tmp
+          tmp=score[i]; score[i]=score[pick]; score[pick]=tmp
+          tmp=best[i]; best[i]=best[pick]; best[pick]=tmp
+          if (i <= 10) print line[i]
+        }
+      }
+    ' "$CHAMPION_POOL_FILE"
+    echo
+    echo "=== recent_evictions ==="
+    if [ -s "$CHAMPION_LIFECYCLE_AUDIT_FILE" ]; then
+      tail -n 20 "$CHAMPION_LIFECYCLE_AUDIT_FILE"
+    else
+      echo "no_audit_file"
+    fi
+  } | tee "$CHAMPION_REPORT_FILE"
+}
+
 main() {
   load_config
   need_cmd curl
@@ -2217,6 +2297,7 @@ main() {
     validate-current) validate_current_command ;;
     observe-current) observe_current_command ;;
     current-observation-report) current_observation_report_command ;;
+    champion-report) champion_report_command ;;
     install-observe-cron) install_observe_cron_command ;;
     external-candidate-check) external_candidate_check_command ;;
     external-observe) external_observe_command ;;

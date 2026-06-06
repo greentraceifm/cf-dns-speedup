@@ -1,0 +1,7 @@
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.26.2.86	80	55.00	0.23	0.30	0	champion
+172.67.76.149	75	54.00	11.50	12.00	2	champion
+104.17.10.2	90	9.00	8.90	9.20	2	observation
+104.17.10.1	85	9.50	9.40	9.60	2	observation
+104.17.10.3	95	8.70	8.60	8.80	2	observation
+104.17.200.1	100	13.00	12.00	12.50	2	new
