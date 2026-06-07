@@ -27,6 +27,7 @@ MAIN_LINE="$(grep -n '^main ' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 head -n "$((MAIN_LINE - 1))" "$SCRIPT" > "$TMP_DIR/lib.sh"
 
 APP_DIR="$TMP_DIR" . "$TMP_DIR/lib.sh"
+. "$ROOT_DIR/lib/champion-pool.sh"
 
 APP_DIR="$TMP_DIR"
 OBSERVATION_HISTORY_FILE="$TMP_DIR/observation-history.tsv"
