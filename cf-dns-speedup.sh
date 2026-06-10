@@ -98,13 +98,18 @@ load_config() {
   CFST_OBSERVE_MIN_SPEED="${CFST_OBSERVE_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
   CFST_PRIMARY_SAFE_MODE="${CFST_PRIMARY_SAFE_MODE:-1}"
   CFST_PRIMARY_MIN_SPEED="${CFST_PRIMARY_MIN_SPEED:-$CFST_RETAIN_MIN_SPEED}"
+  CFST_PRIMARY_FALLBACK_MIN_SPEED="${CFST_PRIMARY_FALLBACK_MIN_SPEED:-6.5}"
   CFST_PRIMARY_PREFER_REGEX="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}"
   CFST_PRIMARY_AVOID_REGEX="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}"
+  CFST_PRIMARY_ALLOW_CHALLENGER="${CFST_PRIMARY_ALLOW_CHALLENGER:-0}"
   CFST_STABLE_SLOT_MODE="${CFST_STABLE_SLOT_MODE:-1}"
   CFST_STABLE_SLOT_COUNT="${CFST_STABLE_SLOT_COUNT:-3}"
   CFST_STABLE_SLOT_MIN_SPEED="${CFST_STABLE_SLOT_MIN_SPEED:-$CFST_PRIMARY_MIN_SPEED}"
+  CFST_STABLE_SLOT_FALLBACK_MIN_SPEED="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-$CFST_PRIMARY_FALLBACK_MIN_SPEED}"
   CFST_STABLE_SLOT_PREFER_REGEX="${CFST_STABLE_SLOT_PREFER_REGEX:-$CFST_PRIMARY_PREFER_REGEX}"
   CFST_STABLE_SLOT_AVOID_REGEX="${CFST_STABLE_SLOT_AVOID_REGEX:-$CFST_PRIMARY_AVOID_REGEX}"
+  CFST_STABLE_SLOT_ALLOW_CHALLENGER="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}"
+  CFST_STABLE_SLOT_ALLOW_AVOID="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -145,7 +150,7 @@ load_config() {
   CFST_MIN_LATENCY="${CFST_MIN_LATENCY:-0}"
   CFST_URL="${CFST_URL:-}"
   IP_VERSION="${IP_VERSION:-ipv4}"
-  DRY_RUN="${DRY_RUN:-1}"
+  DRY_RUN="${DRY_RUN_OVERRIDE:-${DRY_RUN:-1}}"
   enforce_external_candidate_safety
   PROXY_PLUGIN="${PROXY_PLUGIN:-0}"
   PROXY_RESTART_WAIT="${PROXY_RESTART_WAIT:-30}"
@@ -167,11 +172,13 @@ normalize_retention_config() {
   CFST_RETAIN_MIN_SPEED="$(awk -v v="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=8; printf "%.2f", v}')"
   CFST_CHAMPION_FAIL_MIN_SPEED="$(awk -v v="$CFST_CHAMPION_FAIL_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
   CFST_PRIMARY_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
+  CFST_PRIMARY_FALLBACK_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_FALLBACK_MIN_SPEED" -v fallback="$CFST_PRIMARY_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0 || v > fallback) v=fallback; printf "%.2f", v}')"
 }
 
 normalize_slot_config() {
   CFST_STABLE_SLOT_COUNT="$(awk -v v="$CFST_STABLE_SLOT_COUNT" -v limit="$CFST_RESULT_COUNT" 'BEGIN {v+=0; limit+=0; if (v < 0) v=0; if (limit > 0 && v > limit) v=limit; print int(v)}')"
   CFST_STABLE_SLOT_MIN_SPEED="$(awk -v v="$CFST_STABLE_SLOT_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
+  CFST_STABLE_SLOT_FALLBACK_MIN_SPEED="$(awk -v v="$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED" -v fallback="$CFST_STABLE_SLOT_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0 || v > fallback) v=fallback; printf "%.2f", v}')"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="$(awk -v v="$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" -v fallback="$CFST_STABLE_SLOT_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
   CFST_COMPETITIVE_SLOT_COUNT="$(awk -v v="$CFST_COMPETITIVE_SLOT_COUNT" -v limit="$CFST_RESULT_COUNT" 'BEGIN {v+=0; limit+=0; if (v < 0) v=0; if (limit > 0 && v > limit) v=limit; print int(v)}')"
   CFST_OBSERVATION_RECENT_WINDOW="$(awk -v v="$CFST_OBSERVATION_RECENT_WINDOW" 'BEGIN {v+=0; if (v < 1) v=2; print int(v)}')"
@@ -297,6 +304,9 @@ write_run_summary() {
     echo "cfst_stable_slot_mode=$CFST_STABLE_SLOT_MODE"
     echo "cfst_stable_slot_count=$CFST_STABLE_SLOT_COUNT"
     echo "cfst_stable_slot_min_speed=$CFST_STABLE_SLOT_MIN_SPEED"
+    echo "cfst_stable_slot_fallback_min_speed=$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED"
+    echo "cfst_stable_slot_allow_challenger=$CFST_STABLE_SLOT_ALLOW_CHALLENGER"
+    echo "cfst_stable_slot_allow_avoid=$CFST_STABLE_SLOT_ALLOW_AVOID"
     echo "cfst_observation_candidates=$CFST_OBSERVATION_CANDIDATES"
     echo "cfst_observation_candidate_min_speed=$CFST_OBSERVATION_CANDIDATE_MIN_SPEED"
     echo "cfst_dual_pool_mode=$CFST_DUAL_POOL_MODE"
@@ -328,6 +338,9 @@ write_run_summary() {
     printf '  "cfst_stable_slot_mode": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_MODE" | json_escape)"
     printf '  "cfst_stable_slot_count": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_COUNT" | json_escape)"
     printf '  "cfst_stable_slot_min_speed": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_MIN_SPEED" | json_escape)"
+    printf '  "cfst_stable_slot_fallback_min_speed": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED" | json_escape)"
+    printf '  "cfst_stable_slot_allow_challenger": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_ALLOW_CHALLENGER" | json_escape)"
+    printf '  "cfst_stable_slot_allow_avoid": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_ALLOW_AVOID" | json_escape)"
     printf '  "cfst_observation_candidates": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATES" | json_escape)"
     printf '  "cfst_observation_candidate_min_speed": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" | json_escape)"
     printf '  "cfst_dual_pool_mode": %s,\n' "$(printf '%s' "$CFST_DUAL_POOL_MODE" | json_escape)"
@@ -998,8 +1011,11 @@ apply_dual_pool_slots() {
     -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
     -v result_count="${CFST_RESULT_COUNT:-5}" \
     -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" \
+    -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" \
     -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" \
     -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
+    -v allow_challenger="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}" \
+    -v allow_avoid="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}" \
     -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" \
     -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" \
     -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
@@ -1018,9 +1034,9 @@ apply_dual_pool_slots() {
       recent_start=obs_count[ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       recent_lows=0
-      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < min_speed || obs_ok[ip,k] < 1) recent_lows++
+      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < fallback_min_speed || obs_ok[ip,k] < 1) recent_lows++
       if (obs_low[ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
-      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= min_speed && obs_recent_ok[ip] >= 1) return "stable"
+      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= fallback_min_speed && obs_recent_ok[ip] >= 1) return "stable"
       return "watch"
     }
     function stable_score(idx, health, score) {
@@ -1054,7 +1070,7 @@ apply_dual_pool_slots() {
         obs_recent_ok[ip0]=f[7]+0
         obs_sum_min[ip0]+=f[5]+0
         obs_avg_min[ip0]=obs_sum_min[ip0] / obs_count[ip0]
-        if ((f[5]+0) < min_speed || (f[7]+0) < 1) obs_low[ip0]++
+        if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) obs_low[ip0]++
       }
       close(obs_file)
     }
@@ -1071,8 +1087,8 @@ apply_dual_pool_slots() {
       health_status[n]=classify(ip[n])
       stable_rank[n]=stable_score(n)
       competitive_rank[n]=competitive_score(n)
-      if (current_min[n] >= min_speed && enough_rounds && health_status[n] == "stable") stable[++stable_count]=n
-      else if (current_min[n] >= min_speed && enough_rounds && health_status[n] == "watch") watch[++watch_count]=n
+      if (current_min[n] >= fallback_min_speed && enough_rounds && health_status[n] == "stable") stable[++stable_count]=n
+      else if (current_min[n] >= fallback_min_speed && enough_rounds && health_status[n] == "watch") watch[++watch_count]=n
       else if (health_status[n] != "stale") competitive[++competitive_count]=n
       else stale[++stale_count]=n
     }
@@ -1094,6 +1110,10 @@ apply_dual_pool_slots() {
       }
       add_group(stable, stable_count, stable_slots)
       add_group(watch, watch_count, stable_slots)
+      for (i=1; i<=competitive_count && emitted<stable_slots; i++) {
+        idx=competitive[i]
+        if (allow_challenger == "1" && (allow_avoid == "1" || ip[idx] !~ avoid_regex)) add_pick(idx)
+      }
       add_group(competitive, competitive_count, result_count)
       add_group(stable, stable_count, result_count)
       add_group(watch, watch_count, result_count)
@@ -1111,15 +1131,17 @@ promote_primary_safe_candidate() {
   awk -F '\t' \
     -v obs_file="$OBSERVATION_HISTORY_FILE" \
     -v min_speed="${CFST_PRIMARY_MIN_SPEED:-8}" \
+    -v fallback_min_speed="${CFST_PRIMARY_FALLBACK_MIN_SPEED:-6.5}" \
     -v prefer_regex="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}" \
-    -v avoid_regex="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+    -v avoid_regex="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
+    -v allow_challenger="${CFST_PRIMARY_ALLOW_CHALLENGER:-0}" '
     BEGIN {
       while ((getline row < obs_file) > 0) {
         split(row, f, "\t")
         if (f[1] == "observed_at" || f[2] == "") continue
         ip=f[2]
         count[ip]++
-        if ((f[5]+0) < min_speed || (f[7]+0) < 1) low[ip]++
+        if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) low[ip]++
       }
       close(obs_file)
     }
@@ -1127,7 +1149,7 @@ promote_primary_safe_candidate() {
       line[++n]=$0
       ip[n]=$1
       speed[n]=$4+0
-      active=(count[$1] > 0 && low[$1] == 0 && speed[n] >= min_speed)
+      active=(speed[n] >= fallback_min_speed && (allow_challenger == "1" || count[$1] > 0) && low[$1] == 0)
       if (active && $1 ~ prefer_regex) {
         if (best_prefer == 0 || speed[n] > speed[best_prefer]) best_prefer=n
       } else if (active && $1 !~ avoid_regex) {
@@ -1158,8 +1180,11 @@ promote_stable_slots() {
     -v obs_file="$OBSERVATION_HISTORY_FILE" \
     -v slot_count="${CFST_STABLE_SLOT_COUNT:-3}" \
     -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" \
+    -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" \
     -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" \
     -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
+    -v allow_challenger="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}" \
+    -v allow_avoid="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}" \
     -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" '
     function add_pick(idx) {
       if (idx <= 0 || picked[idx]) return
@@ -1175,7 +1200,7 @@ promote_stable_slots() {
         obs_count[ip]++
         obs_recent_min[ip]=f[5]+0
         obs_recent_ok[ip]=f[7]+0
-        if ((f[5]+0) < min_speed || (f[7]+0) < 1) obs_low[ip]++
+        if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) obs_low[ip]++
       }
       close(obs_file)
     }
@@ -1185,11 +1210,12 @@ promote_stable_slots() {
       current_min[n]=$4+0
       ok[n]=$6+0
       enough_rounds=(rounds <= 0 || ok[n] >= rounds)
-      observed_stable=(obs_count[$1] > 0 && obs_low[$1] == 0 && obs_recent_min[$1] >= min_speed && obs_recent_ok[$1] >= 1)
-      stable[n]=(current_min[n] >= min_speed && enough_rounds && observed_stable)
+      observed_stable=(obs_count[$1] > 0 && obs_low[$1] == 0 && obs_recent_min[$1] >= fallback_min_speed && obs_recent_ok[$1] >= 1)
+      challenger_ok=(allow_challenger == "1" && obs_count[$1] == 0)
+      stable[n]=(current_min[n] >= fallback_min_speed && enough_rounds && (observed_stable || challenger_ok))
       if (stable[n] && $1 ~ prefer_regex) prefer[++prefer_count]=n
       else if (stable[n] && $1 !~ avoid_regex) neutral[++neutral_count]=n
-      else if (stable[n]) avoid[++avoid_count]=n
+      else if (stable[n] && allow_avoid == "1") avoid[++avoid_count]=n
     }
     END {
       for (i=1; i<=prefer_count && emitted<slot_count; i++) add_pick(prefer[i])

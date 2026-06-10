@@ -42,10 +42,15 @@ CFST_STABLE_SLOT_COUNT=3
 CFST_RESULT_COUNT=5
 CFST_STABLE_SLOT_MIN_SPEED=8
 CFST_PRIMARY_MIN_SPEED=8
+CFST_STABLE_SLOT_FALLBACK_MIN_SPEED=6.5
+CFST_PRIMARY_FALLBACK_MIN_SPEED=6.5
 CFST_STABLE_SLOT_PREFER_REGEX='^104\.17\.'
 CFST_PRIMARY_PREFER_REGEX='^104\.17\.'
 CFST_STABLE_SLOT_AVOID_REGEX='^(104\.20\.|104\.26\.|172\.67\.)'
 CFST_PRIMARY_AVOID_REGEX='^(104\.20\.|104\.26\.|172\.67\.)'
+CFST_STABLE_SLOT_ALLOW_CHALLENGER=0
+CFST_STABLE_SLOT_ALLOW_AVOID=0
+CFST_PRIMARY_ALLOW_CHALLENGER=0
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
@@ -70,6 +75,8 @@ FIRST_IP="$(awk -F '\t' 'NR == 1 {print $1}' "$TMP_DIR/selected.tsv")"
 
 TOP3="$(awk -F '\t' 'NR <= 3 {print $1}' "$TMP_DIR/selected.tsv")"
 echo "$TOP3" | grep -q '^104\.26\.2\.86$' && fail "stale IP entered primary stable slots"
+echo "$TOP3" | grep -q '^172\.67\.76\.149$' && fail "avoid-family challenger entered primary stable slots"
+echo "$TOP3" | grep -q '^104\.17\.200\.1$' && fail "unobserved challenger entered primary stable slots"
 pass "dual-pool keeps stale IP out of primary slots"
 
 cp "$FIXTURES/lifecycle-champion-pool.tsv" "$CHAMPION_POOL_FILE"
