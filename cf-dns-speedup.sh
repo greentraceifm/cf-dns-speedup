@@ -102,6 +102,12 @@ load_config() {
   CFST_PRIMARY_PREFER_REGEX="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}"
   CFST_PRIMARY_AVOID_REGEX="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}"
   CFST_PRIMARY_ALLOW_CHALLENGER="${CFST_PRIMARY_ALLOW_CHALLENGER:-0}"
+  CFST_PRIMARY_QUORUM_MODE="${CFST_PRIMARY_QUORUM_MODE:-1}"
+  CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}"
+  CFST_PRIMARY_QUORUM_RECENT_PASSES="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}"
+  CFST_PRIMARY_DEGRADE_PROTECTION="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}"
+  CFST_PRIMARY_DEGRADE_MIN_SPEED="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-${CFST_DEGRADE_MIN_SPEED:-2}}"
+  CFST_PRIMARY_GUARD_ENFORCE="${CFST_PRIMARY_GUARD_ENFORCE:-1}"
   CFST_STABLE_SLOT_MODE="${CFST_STABLE_SLOT_MODE:-1}"
   CFST_STABLE_SLOT_COUNT="${CFST_STABLE_SLOT_COUNT:-3}"
   CFST_STABLE_SLOT_MIN_SPEED="${CFST_STABLE_SLOT_MIN_SPEED:-$CFST_PRIMARY_MIN_SPEED}"
@@ -173,6 +179,7 @@ normalize_retention_config() {
   CFST_CHAMPION_FAIL_MIN_SPEED="$(awk -v v="$CFST_CHAMPION_FAIL_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
   CFST_PRIMARY_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_MIN_SPEED" -v fallback="$CFST_RETAIN_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
   CFST_PRIMARY_FALLBACK_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_FALLBACK_MIN_SPEED" -v fallback="$CFST_PRIMARY_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0 || v > fallback) v=fallback; printf "%.2f", v}')"
+  CFST_PRIMARY_DEGRADE_MIN_SPEED="$(awk -v v="$CFST_PRIMARY_DEGRADE_MIN_SPEED" -v fallback="$CFST_DEGRADE_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v < 0) v=fallback; printf "%.2f", v}')"
 }
 
 normalize_slot_config() {
@@ -182,6 +189,8 @@ normalize_slot_config() {
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="$(awk -v v="$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" -v fallback="$CFST_STABLE_SLOT_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
   CFST_COMPETITIVE_SLOT_COUNT="$(awk -v v="$CFST_COMPETITIVE_SLOT_COUNT" -v limit="$CFST_RESULT_COUNT" 'BEGIN {v+=0; limit+=0; if (v < 0) v=0; if (limit > 0 && v > limit) v=limit; print int(v)}')"
   CFST_OBSERVATION_RECENT_WINDOW="$(awk -v v="$CFST_OBSERVATION_RECENT_WINDOW" 'BEGIN {v+=0; if (v < 1) v=2; print int(v)}')"
+  CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS="$(awk -v v="$CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS" 'BEGIN {v+=0; if (v < 1) v=2; print int(v)}')"
+  CFST_PRIMARY_QUORUM_RECENT_PASSES="$(awk -v v="$CFST_PRIMARY_QUORUM_RECENT_PASSES" -v window="$CFST_OBSERVATION_RECENT_WINDOW" 'BEGIN {v+=0; window+=0; if (v < 1) v=2; if (window > 0 && v > window) v=window; print int(v)}')"
   CFST_OBSERVATION_STALE_LOW_COUNT="$(awk -v v="$CFST_OBSERVATION_STALE_LOW_COUNT" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
   CFST_OBSERVATION_STABLE_MAX_LOW_COUNT="$(awk -v v="$CFST_OBSERVATION_STABLE_MAX_LOW_COUNT" 'BEGIN {v+=0; if (v < 0) v=1; print int(v)}')"
 }
@@ -307,6 +316,12 @@ write_run_summary() {
     echo "cfst_stable_slot_fallback_min_speed=$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED"
     echo "cfst_stable_slot_allow_challenger=$CFST_STABLE_SLOT_ALLOW_CHALLENGER"
     echo "cfst_stable_slot_allow_avoid=$CFST_STABLE_SLOT_ALLOW_AVOID"
+    echo "cfst_primary_quorum_mode=$CFST_PRIMARY_QUORUM_MODE"
+    echo "cfst_primary_quorum_min_observations=$CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS"
+    echo "cfst_primary_quorum_recent_passes=$CFST_PRIMARY_QUORUM_RECENT_PASSES"
+    echo "cfst_primary_degrade_protection=$CFST_PRIMARY_DEGRADE_PROTECTION"
+    echo "cfst_primary_degrade_min_speed=$CFST_PRIMARY_DEGRADE_MIN_SPEED"
+    echo "cfst_primary_guard_enforce=$CFST_PRIMARY_GUARD_ENFORCE"
     echo "cfst_observation_candidates=$CFST_OBSERVATION_CANDIDATES"
     echo "cfst_observation_candidate_min_speed=$CFST_OBSERVATION_CANDIDATE_MIN_SPEED"
     echo "cfst_dual_pool_mode=$CFST_DUAL_POOL_MODE"
@@ -341,6 +356,12 @@ write_run_summary() {
     printf '  "cfst_stable_slot_fallback_min_speed": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED" | json_escape)"
     printf '  "cfst_stable_slot_allow_challenger": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_ALLOW_CHALLENGER" | json_escape)"
     printf '  "cfst_stable_slot_allow_avoid": %s,\n' "$(printf '%s' "$CFST_STABLE_SLOT_ALLOW_AVOID" | json_escape)"
+    printf '  "cfst_primary_quorum_mode": %s,\n' "$(printf '%s' "$CFST_PRIMARY_QUORUM_MODE" | json_escape)"
+    printf '  "cfst_primary_quorum_min_observations": %s,\n' "$(printf '%s' "$CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS" | json_escape)"
+    printf '  "cfst_primary_quorum_recent_passes": %s,\n' "$(printf '%s' "$CFST_PRIMARY_QUORUM_RECENT_PASSES" | json_escape)"
+    printf '  "cfst_primary_degrade_protection": %s,\n' "$(printf '%s' "$CFST_PRIMARY_DEGRADE_PROTECTION" | json_escape)"
+    printf '  "cfst_primary_degrade_min_speed": %s,\n' "$(printf '%s' "$CFST_PRIMARY_DEGRADE_MIN_SPEED" | json_escape)"
+    printf '  "cfst_primary_guard_enforce": %s,\n' "$(printf '%s' "$CFST_PRIMARY_GUARD_ENFORCE" | json_escape)"
     printf '  "cfst_observation_candidates": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATES" | json_escape)"
     printf '  "cfst_observation_candidate_min_speed": %s,\n' "$(printf '%s' "$CFST_OBSERVATION_CANDIDATE_MIN_SPEED" | json_escape)"
     printf '  "cfst_dual_pool_mode": %s,\n' "$(printf '%s' "$CFST_DUAL_POOL_MODE" | json_escape)"
@@ -1016,6 +1037,11 @@ apply_dual_pool_slots() {
     -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
     -v allow_challenger="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}" \
     -v allow_avoid="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}" \
+    -v quorum_mode="${CFST_PRIMARY_QUORUM_MODE:-1}" \
+    -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" \
+    -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" \
+    -v degrade_protection="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}" \
+    -v degrade_min_speed="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-2}" \
     -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" \
     -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" \
     -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
@@ -1028,6 +1054,17 @@ apply_dual_pool_slots() {
     }
     function add_group(arr, count, limit, i) {
       for (i=1; i<=count && emitted<limit; i++) add_pick(arr[i])
+    }
+    function quorum_pass(ip, recent_start, passes) {
+      if (quorum_mode != "1") return 1
+      if (obs_count[ip] < quorum_min_obs) return 0
+      recent_start=obs_count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      passes=0
+      for (k=recent_start; k<=obs_count[ip]; k++) {
+        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      }
+      return passes >= quorum_recent_passes
     }
     function classify(ip, recent_start, recent_lows) {
       if (obs_count[ip] == 0) return "challenger"
@@ -1087,8 +1124,9 @@ apply_dual_pool_slots() {
       health_status[n]=classify(ip[n])
       stable_rank[n]=stable_score(n)
       competitive_rank[n]=competitive_score(n)
-      if (current_min[n] >= fallback_min_speed && enough_rounds && health_status[n] == "stable") stable[++stable_count]=n
-      else if (current_min[n] >= fallback_min_speed && enough_rounds && health_status[n] == "watch") watch[++watch_count]=n
+      primary_ok=(current_min[n] >= fallback_min_speed && enough_rounds && quorum_pass(ip[n]) && (degrade_protection != "1" || current_min[n] >= degrade_min_speed))
+      if (primary_ok && health_status[n] == "stable") stable[++stable_count]=n
+      else if (primary_ok && health_status[n] == "watch") watch[++watch_count]=n
       else if (health_status[n] != "stale") competitive[++competitive_count]=n
       else stale[++stale_count]=n
     }
@@ -1134,13 +1172,33 @@ promote_primary_safe_candidate() {
     -v fallback_min_speed="${CFST_PRIMARY_FALLBACK_MIN_SPEED:-6.5}" \
     -v prefer_regex="${CFST_PRIMARY_PREFER_REGEX:-^104\\.17\\.}" \
     -v avoid_regex="${CFST_PRIMARY_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
-    -v allow_challenger="${CFST_PRIMARY_ALLOW_CHALLENGER:-0}" '
+    -v allow_challenger="${CFST_PRIMARY_ALLOW_CHALLENGER:-0}" \
+    -v quorum_mode="${CFST_PRIMARY_QUORUM_MODE:-1}" \
+    -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" \
+    -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" \
+    -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
+    -v degrade_protection="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}" \
+    -v degrade_min_speed="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-2}" '
+    function quorum_pass(ip, recent_start, passes) {
+      if (quorum_mode != "1") return 1
+      if (count[ip] < quorum_min_obs) return 0
+      recent_start=count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      passes=0
+      for (k=recent_start; k<=count[ip]; k++) {
+        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      }
+      return passes >= quorum_recent_passes
+    }
     BEGIN {
       while ((getline row < obs_file) > 0) {
         split(row, f, "\t")
         if (f[1] == "observed_at" || f[2] == "") continue
         ip=f[2]
         count[ip]++
+        idx=count[ip]
+        obs_min[ip,idx]=f[5]+0
+        obs_ok[ip,idx]=f[7]+0
         if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) low[ip]++
       }
       close(obs_file)
@@ -1149,7 +1207,7 @@ promote_primary_safe_candidate() {
       line[++n]=$0
       ip[n]=$1
       speed[n]=$4+0
-      active=(speed[n] >= fallback_min_speed && (allow_challenger == "1" || count[$1] > 0) && low[$1] == 0)
+      active=(speed[n] >= fallback_min_speed && (allow_challenger == "1" || count[$1] > 0) && low[$1] == 0 && quorum_pass($1) && (degrade_protection != "1" || speed[n] >= degrade_min_speed))
       if (active && $1 ~ prefer_regex) {
         if (best_prefer == 0 || speed[n] > speed[best_prefer]) best_prefer=n
       } else if (active && $1 !~ avoid_regex) {
@@ -1185,6 +1243,12 @@ promote_stable_slots() {
     -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" \
     -v allow_challenger="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}" \
     -v allow_avoid="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}" \
+    -v quorum_mode="${CFST_PRIMARY_QUORUM_MODE:-1}" \
+    -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" \
+    -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" \
+    -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
+    -v degrade_protection="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}" \
+    -v degrade_min_speed="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-2}" \
     -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" '
     function add_pick(idx) {
       if (idx <= 0 || picked[idx]) return
@@ -1192,12 +1256,26 @@ promote_stable_slots() {
       print line[idx]
       emitted++
     }
+    function quorum_pass(ip, recent_start, passes) {
+      if (quorum_mode != "1") return 1
+      if (obs_count[ip] < quorum_min_obs) return 0
+      recent_start=obs_count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      passes=0
+      for (k=recent_start; k<=obs_count[ip]; k++) {
+        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      }
+      return passes >= quorum_recent_passes
+    }
     BEGIN {
       while ((getline row < obs_file) > 0) {
         split(row, f, "\t")
         if (f[1] == "observed_at" || f[2] == "") continue
         ip=f[2]
         obs_count[ip]++
+        idx=obs_count[ip]
+        obs_min[ip,idx]=f[5]+0
+        obs_ok[ip,idx]=f[7]+0
         obs_recent_min[ip]=f[5]+0
         obs_recent_ok[ip]=f[7]+0
         if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) obs_low[ip]++
@@ -1212,7 +1290,7 @@ promote_stable_slots() {
       enough_rounds=(rounds <= 0 || ok[n] >= rounds)
       observed_stable=(obs_count[$1] > 0 && obs_low[$1] == 0 && obs_recent_min[$1] >= fallback_min_speed && obs_recent_ok[$1] >= 1)
       challenger_ok=(allow_challenger == "1" && obs_count[$1] == 0)
-      stable[n]=(current_min[n] >= fallback_min_speed && enough_rounds && (observed_stable || challenger_ok))
+      stable[n]=(current_min[n] >= fallback_min_speed && enough_rounds && (observed_stable || challenger_ok) && quorum_pass($1) && (degrade_protection != "1" || current_min[n] >= degrade_min_speed))
       if (stable[n] && $1 ~ prefer_regex) prefer[++prefer_count]=n
       else if (stable[n] && $1 !~ avoid_regex) neutral[++neutral_count]=n
       else if (stable[n] && allow_avoid == "1") avoid[++avoid_count]=n
@@ -1221,7 +1299,13 @@ promote_stable_slots() {
       for (i=1; i<=prefer_count && emitted<slot_count; i++) add_pick(prefer[i])
       for (i=1; i<=neutral_count && emitted<slot_count; i++) add_pick(neutral[i])
       for (i=1; i<=avoid_count && emitted<slot_count; i++) add_pick(avoid[i])
-      for (i=1; i<=n; i++) add_pick(i)
+      for (i=1; i<=n && emitted<slot_count; i++) {
+        if (stable[i]) add_pick(i)
+      }
+      for (i=1; i<=n; i++) {
+        if (!stable[i] && emitted < slot_count) continue
+        add_pick(i)
+      }
     }
   '
 }
@@ -1718,6 +1802,7 @@ run_once() {
   restart_proxy_if_needed
   show_best_ips
   identify_reverse_ip_regions
+  assert_primary_slot_guard
   update_cloudflare
   send_notifications
   RUN_STATUS="success"
@@ -1760,6 +1845,70 @@ print_dns_health() {
   done
 }
 
+print_primary_slot_guard() {
+  [ -s "$STABILITY_RESULT_FILE" ] || {
+    echo "primary_slot_guard unavailable: missing $STABILITY_RESULT_FILE"
+    return 0
+  }
+
+  awk -F '\t' \
+    -v obs_file="$OBSERVATION_HISTORY_FILE" \
+    -v slot_count="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" \
+    -v quorum_mode="${CFST_PRIMARY_QUORUM_MODE:-1}" \
+    -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" \
+    -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" \
+    -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
+    -v degrade_protection="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}" \
+    -v degrade_min_speed="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-2}" '
+    function recent_pass_count(ip, recent_start, passes) {
+      recent_start=obs_count[ip] - recent_window + 1
+      if (recent_start < 1) recent_start=1
+      passes=0
+      for (k=recent_start; k<=obs_count[ip]; k++) {
+        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      }
+      return passes
+    }
+    BEGIN {
+      while ((getline row < obs_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "observed_at" || f[2] == "") continue
+        ip=f[2]
+        obs_count[ip]++
+        idx=obs_count[ip]
+        obs_min[ip,idx]=f[5]+0
+        obs_ok[ip,idx]=f[7]+0
+      }
+      close(obs_file)
+      print "slot\tip\tmin_speed_mbps\tobservations\trecent_passes\tstatus"
+    }
+    NR > 1 && $1 != "" && printed < slot_count {
+      ip=$1
+      min_speed=$4+0
+      passes=recent_pass_count(ip)
+      status="ok"
+      if (degrade_protection == "1" && min_speed < degrade_min_speed) status="degraded"
+      else if (min_speed < fallback_min_speed) status="below_primary_floor"
+      else if (quorum_mode == "1" && obs_count[ip] < quorum_min_obs) status="quorum_pending"
+      else if (quorum_mode == "1" && passes < quorum_recent_passes) status="quorum_pending"
+      print (printed + 1) "\t" ip "\t" sprintf("%.2f", min_speed) "\t" (obs_count[ip]+0) "\t" passes "\t" status
+      printed++
+    }
+  ' "$STABILITY_RESULT_FILE"
+}
+
+assert_primary_slot_guard() {
+  [ "${CFST_PRIMARY_GUARD_ENFORCE:-1}" = "1" ] || return 0
+  local report bad
+  report="$(print_primary_slot_guard)"
+  bad="$(printf '%s\n' "$report" | awk -F '\t' 'NR > 1 && $6 != "ok" {print; found=1} END {exit found ? 0 : 1}' || true)"
+  if [ -n "$bad" ]; then
+    printf '%s\n' "$report" > "$APP_DIR/primary-slot-guard.blocked.tsv"
+    die "primary slot guard blocked DNS update; unsafe primary candidates: $bad"
+  fi
+}
+
 health_check_command() {
   mkdir -p "$APP_DIR"
   {
@@ -1778,6 +1927,12 @@ health_check_command() {
     printf 'CFST_STABILITY_TEST_ROUNDS=%s\n' "$CFST_STABILITY_TEST_ROUNDS"
     printf 'CFST_RETAIN_MIN_SPEED=%s\n' "$CFST_RETAIN_MIN_SPEED"
     printf 'CFST_DEGRADE_MIN_SPEED=%s\n' "$CFST_DEGRADE_MIN_SPEED"
+    printf 'CFST_PRIMARY_QUORUM_MODE=%s\n' "$CFST_PRIMARY_QUORUM_MODE"
+    printf 'CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS=%s\n' "$CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS"
+    printf 'CFST_PRIMARY_QUORUM_RECENT_PASSES=%s\n' "$CFST_PRIMARY_QUORUM_RECENT_PASSES"
+    printf 'CFST_PRIMARY_DEGRADE_PROTECTION=%s\n' "$CFST_PRIMARY_DEGRADE_PROTECTION"
+    printf 'CFST_PRIMARY_DEGRADE_MIN_SPEED=%s\n' "$CFST_PRIMARY_DEGRADE_MIN_SPEED"
+    printf 'CFST_PRIMARY_GUARD_ENFORCE=%s\n' "$CFST_PRIMARY_GUARD_ENFORCE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"
@@ -1790,6 +1945,9 @@ health_check_command() {
     echo
     echo "=== stability ==="
     cat "$STABILITY_RESULT_FILE" 2>/dev/null || true
+    echo
+    echo "=== primary-slot-guard ==="
+    print_primary_slot_guard
     echo
     echo "=== summary ==="
     cat "$LAST_RUN_SUMMARY" 2>/dev/null || true
