@@ -80,6 +80,8 @@ FIRST_IP="$(awk -F '\t' 'NR == 1 {print $1}' "$TMP_DIR/selected.tsv")"
 [ "$FIRST_IP" = "104.17.10.1" ] || fail "stable preferred IP should be first, got $FIRST_IP"
 
 TOP3="$(awk -F '\t' 'NR <= 3 {print $1}' "$TMP_DIR/selected.tsv")"
+SELECTED_COUNT="$(wc -l < "$TMP_DIR/selected.tsv" | tr -d ' ')"
+[ "$SELECTED_COUNT" = "5" ] || fail "selector should preserve full result count, got $SELECTED_COUNT"
 echo "$TOP3" | grep -q '^104\.26\.2\.86$' && fail "stale IP entered primary stable slots"
 echo "$TOP3" | grep -q '^172\.67\.76\.149$' && fail "avoid-family challenger entered primary stable slots"
 echo "$TOP3" | grep -q '^104\.17\.200\.1$' && fail "unobserved challenger entered primary stable slots"
@@ -104,6 +106,21 @@ if ( assert_primary_slot_guard >/dev/null 2>&1 ); then
 fi
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "primary-slot guard blocks unsafe DNS update"
+
+SHORT_STABILITY_RESULT_FILE="$TMP_DIR/short-primary.tsv"
+cat > "$SHORT_STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.10.1	85	9.50	9.40	9.60	2	observation
+104.17.10.2	90	9.00	8.90	9.20	2	observation
+EOF
+STABILITY_RESULT_FILE="$SHORT_STABILITY_RESULT_FILE"
+MISSING_STATUS="$(print_primary_slot_guard | awk -F '\t' '$2 == "missing" {print $6; exit}')"
+[ "$MISSING_STATUS" = "missing" ] || fail "primary guard should report missing primary slot, got ${MISSING_STATUS:-missing-report-absent}"
+if ( assert_primary_slot_guard >/dev/null 2>&1 ); then
+  fail "primary guard should block missing primary slot"
+fi
+STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
+pass "primary-slot guard blocks missing primary slots"
 
 cp "$FIXTURES/lifecycle-champion-pool.tsv" "$CHAMPION_POOL_FILE"
 update_champion_pool >/dev/null

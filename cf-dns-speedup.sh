@@ -1302,10 +1302,7 @@ promote_stable_slots() {
       for (i=1; i<=n && emitted<slot_count; i++) {
         if (stable[i]) add_pick(i)
       }
-      for (i=1; i<=n; i++) {
-        if (!stable[i] && emitted < slot_count) continue
-        add_pick(i)
-      }
+      for (i=1; i<=n; i++) add_pick(i)
     }
   '
 }
@@ -1894,6 +1891,12 @@ print_primary_slot_guard() {
       else if (quorum_mode == "1" && passes < quorum_recent_passes) status="quorum_pending"
       print (printed + 1) "\t" ip "\t" sprintf("%.2f", min_speed) "\t" (obs_count[ip]+0) "\t" passes "\t" status
       printed++
+    }
+    END {
+      while (printed < slot_count) {
+        printed++
+        print printed "\tmissing\t0.00\t0\t0\tmissing"
+      }
     }
   ' "$STABILITY_RESULT_FILE"
 }
