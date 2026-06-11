@@ -14,16 +14,20 @@ update_champion_pool() {
   now="$(date '+%F %T')"
   [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\tlifecycle_state\tlifecycle_reason\tobservation_count\tconsecutive_passes\tconsecutive_lows\tpromotion_ready\n' > "$old"
   [ -s "$CHAMPION_LIFECYCLE_AUDIT_FILE" ] || printf 'observed_at\tip\taction\thealth_status\tfail_count\tstable_score\tlifecycle_reason\n' > "$CHAMPION_LIFECYCLE_AUDIT_FILE"
-  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v audit_file="$CHAMPION_LIFECYCLE_AUDIT_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
-    function classify(ip, recent_start, recent_lows) {
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v audit_file="$CHAMPION_LIFECYCLE_AUDIT_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+    function classify(ip, recent_start, recent_lows, passes) {
       if (obs_count[ip] == 0) return "challenger"
       recent_start=obs_count[ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       recent_lows=0
-      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < min_speed || obs_ok[ip,k] < 1) recent_lows++
+      passes=0
+      for (k=recent_start; k<=obs_count[ip]; k++) {
+        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+        else recent_lows++
+      }
       recent_low[ip]=recent_lows
-      if (obs_low[ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
-      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= min_speed && obs_recent_ok[ip] >= 1) return "stable"
+      if (recent_lows >= recent_window) return "stale"
+      if (obs_count[ip] >= quorum_min_obs && passes >= quorum_recent_passes && obs_recent_min[ip] >= fallback_min_speed && obs_recent_ok[ip] >= 1) return "stable"
       return "watch"
     }
     function compute_stable_score(ip, score) {
@@ -37,7 +41,7 @@ update_champion_pool() {
       return score
     }
     function pass_ok(ip, idx) {
-      return obs_min[ip,idx] >= min_speed && obs_ok[ip,idx] >= 1
+      return obs_min[ip,idx] >= fallback_min_speed && obs_ok[ip,idx] >= 1
     }
     function consecutive_passes(ip, idx, count) {
       for (idx=obs_count[ip]; idx>=1; idx--) {
@@ -66,7 +70,7 @@ update_champion_pool() {
       return "no_observation_history_yet"
     }
     function promotion_ready(ip) {
-      return health[ip] == "stable" && consecutive_pass[ip] >= recent_window && recent[ip] >= min_speed
+      return health[ip] == "stable" && obs_count[ip] >= quorum_min_obs && consecutive_pass[ip] >= quorum_recent_passes && recent[ip] >= fallback_min_speed
     }
     BEGIN {
       while ((getline row < obs_file) > 0) {
@@ -81,7 +85,7 @@ update_champion_pool() {
         obs_recent_ok[ip]=f[7]+0
         obs_sum_min[ip]+=f[5]+0
         obs_avg_min[ip]=obs_sum_min[ip] / obs_count[ip]
-        if ((f[5]+0) < min_speed || (f[7]+0) < 1) obs_low[ip]++
+        if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) obs_low[ip]++
       }
       close(obs_file)
     }
@@ -103,7 +107,7 @@ update_champion_pool() {
       if (source[ip] == "") source[ip]=$7
       else if (source[ip] !~ "(^|,)" $7 "(,|$)") source[ip]=source[ip] "," $7
       health[ip]=classify(ip)
-      if (health[ip] == "stale" || min < degrade || min < champion_fail || (rounds > 0 && ok < rounds)) fail[ip]++
+      if (health[ip] == "stale" || min < degrade || min < fallback_min_speed || (rounds > 0 && ok < rounds)) fail[ip]++
       else fail[ip]=0
     }
     END {
