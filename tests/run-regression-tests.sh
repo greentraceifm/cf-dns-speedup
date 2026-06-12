@@ -133,6 +133,7 @@ awk -F '\t' '$1 == "104.17.10.1" && $13 == "stable" && $18 == "1" {found=1} END 
   || fail "stable IP did not retain lifecycle state and promotion_ready"
 awk -F '\t' '$1 == "104.17.10.4" && $9 == "stable" && $13 == "stable" && $18 == "1" {found=1} END {exit found ? 0 : 1}' "$CHAMPION_POOL_FILE" \
   || fail "fallback-quorum stable IP was not promotion_ready"
+grep -q '^print_champion_summary()' "$SCRIPT" || fail "champion summary function is missing"
 pass "champion lifecycle fields are generated consistently"
 
 echo "all regression tests passed"

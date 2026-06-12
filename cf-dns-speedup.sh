@@ -1912,6 +1912,37 @@ assert_primary_slot_guard() {
   fi
 }
 
+print_champion_summary() {
+  [ -s "$CHAMPION_POOL_FILE" ] || {
+    echo "champion_summary unavailable: missing $CHAMPION_POOL_FILE"
+    return 0
+  }
+
+  awk -F '\t' '
+    NR == 1 {next}
+    $1 != "" {
+      total++
+      health=$9 == "" ? "unknown" : $9
+      pool=$12 == "" ? "unknown" : $12
+      ready=$18 == "" ? "0" : $18
+      health_count[health]++
+      pool_count[pool]++
+      if (ready == "1") ready_count++
+      if (($5+0) > 0) failing_count++
+    }
+    END {
+      printf "total=%d\n", total+0
+      printf "stable=%d\n", health_count["stable"]+0
+      printf "watch=%d\n", health_count["watch"]+0
+      printf "stale=%d\n", health_count["stale"]+0
+      printf "promotion_ready=%d\n", ready_count+0
+      printf "with_fail_count=%d\n", failing_count+0
+      printf "stable_pool=%d\n", pool_count["stable"]+0
+      printf "competitive_pool=%d\n", pool_count["competitive"]+0
+    }
+  ' "$CHAMPION_POOL_FILE"
+}
+
 health_check_command() {
   mkdir -p "$APP_DIR"
   {
@@ -1951,6 +1982,9 @@ health_check_command() {
     echo
     echo "=== primary-slot-guard ==="
     print_primary_slot_guard
+    echo
+    echo "=== champion-summary ==="
+    print_champion_summary
     echo
     echo "=== summary ==="
     cat "$LAST_RUN_SUMMARY" 2>/dev/null || true
