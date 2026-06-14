@@ -61,6 +61,7 @@ CFST_PRIMARY_GUARD_ENFORCE=1
 CFST_EXPOSED_SLOT_GUARD=1
 CFST_EXPOSED_SLOT_MIN_SPEED=6.5
 CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=43200
+CFST_GUARD_REPAIR_APPLY=0
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
@@ -126,6 +127,21 @@ ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_roun
 EOF
 DNS_SLOT4_AFTER_REPAIR="$(best_ip_list | awk 'NR == 4 {print $1}')"
 [ "$DNS_SLOT4_AFTER_REPAIR" = "104.17.10.1" ] || fail "exposed slot guard state should keep degraded IP mirrored after DNS repair, got $DNS_SLOT4_AFTER_REPAIR"
+CF_RECORD_NAMES="auto.example.test auto1.example.test auto2.example.test auto3.example.test auto4.example.test"
+CFST_GUARD_REPAIR_CURRENT_FILE="$TMP_DIR/current-dns.tsv"
+cat > "$CFST_GUARD_REPAIR_CURRENT_FILE" <<'EOF'
+name	ip
+auto.example.test	104.17.10.1
+auto1.example.test	104.17.10.2
+auto2.example.test	104.17.10.3
+auto3.example.test	172.67.76.149
+auto4.example.test	104.26.2.86
+EOF
+guard_repair_plan_rows > "$TMP_DIR/guard-repair-plan.tsv"
+awk -F '\t' '$1 == "auto3.example.test" && $2 == "172.67.76.149" && $3 == "104.17.10.1" && $4 == "update" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/guard-repair-plan.tsv" \
+  || fail "guard-repair should plan auto3 update to mirrored stable slot"
+awk -F '\t' '$1 == "auto4.example.test" && $2 == "104.26.2.86" && $3 == "104.17.10.2" && $4 == "update" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/guard-repair-plan.tsv" \
+  || fail "guard-repair should plan auto4 update to mirrored stable slot"
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "exposed slot guard mirrors degraded competitive slots"
 

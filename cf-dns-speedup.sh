@@ -11,6 +11,7 @@ STABILITY_VERIFY_RESULT_FILE="${STABILITY_VERIFY_RESULT_FILE:-$APP_DIR/result.st
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 EXPOSED_SLOT_GUARD_STATE_FILE="${EXPOSED_SLOT_GUARD_STATE_FILE:-$APP_DIR/exposed-slot-guard.tsv}"
+GUARD_REPAIR_REPORT_FILE="${GUARD_REPAIR_REPORT_FILE:-$APP_DIR/guard-repair.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -120,6 +121,8 @@ load_config() {
   CFST_EXPOSED_SLOT_GUARD="${CFST_EXPOSED_SLOT_GUARD:-1}"
   CFST_EXPOSED_SLOT_MIN_SPEED="${CFST_EXPOSED_SLOT_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
   CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}"
+  CFST_GUARD_REPAIR_APPLY="${CFST_GUARD_REPAIR_APPLY:-0}"
+  CFST_GUARD_REPAIR_CURRENT_FILE="${CFST_GUARD_REPAIR_CURRENT_FILE:-}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -1863,6 +1866,86 @@ update_cloudflare() {
   fi
 }
 
+guard_repair_desired_rows() {
+  [ -n "$CF_RECORD_NAMES" ] || die "guard-repair requires CF_RECORD_NAMES"
+  local ip_tmp i name ip
+  ip_tmp="$APP_DIR/guard-repair.desired.tmp"
+  selected_dns_rows > "$ip_tmp"
+  i=1
+  for name in $CF_RECORD_NAMES; do
+    ip="$(sed -n "${i}p" "$ip_tmp")"
+    [ -n "$ip" ] && printf '%s\t%s\n' "$name" "$ip"
+    i=$((i + 1))
+  done
+  rm -f "$ip_tmp"
+}
+
+guard_repair_current_rows() {
+  if [ -n "${CFST_GUARD_REPAIR_CURRENT_FILE:-}" ] && [ -s "$CFST_GUARD_REPAIR_CURRENT_FILE" ]; then
+    awk -F '\t' 'NR == 1 && $1 == "name" {next} $1 != "" {print $1 "\t" $2}' "$CFST_GUARD_REPAIR_CURRENT_FILE"
+    return 0
+  fi
+
+  check_cloudflare_auth
+  local api name response current
+  api="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records"
+  for name in $CF_RECORD_NAMES; do
+    response="$(cf_api GET "$api?type=A&name=$name")"
+    current="$(echo "$response" | jq -r 'if .success == true then (.result[0].content // "missing") else "unavailable" end')"
+    printf '%s\t%s\n' "$name" "$current"
+  done
+}
+
+guard_repair_plan_rows() {
+  local desired_file current_file
+  desired_file="$APP_DIR/guard-repair.desired.tsv"
+  current_file="$APP_DIR/guard-repair.current.tsv"
+  guard_repair_desired_rows > "$desired_file"
+  guard_repair_current_rows > "$current_file"
+
+  awk -F '\t' '
+    FNR == NR {
+      desired[$1]=$2
+      order[++order_count]=$1
+      next
+    }
+    $1 != "" {current[$1]=$2}
+    END {
+      print "name\tcurrent_ip\tdesired_ip\taction"
+      for (i=1; i<=order_count; i++) {
+        name=order[i]
+        cur=(name in current) ? current[name] : "missing"
+        want=desired[name]
+        action="ok"
+        if (want == "") action="skip_missing_desired"
+        else if (cur == "missing" || cur == "") action="create"
+        else if (cur == "unavailable") action="blocked_unavailable"
+        else if (cur != want) action="update"
+        printf "%s\t%s\t%s\t%s\n", name, cur, want, action
+      }
+    }
+  ' "$desired_file" "$current_file"
+}
+
+guard_repair_command() {
+  acquire_lock
+  mkdir -p "$APP_DIR"
+  log "guard-repair: checking exposed DNS slots; apply=$CFST_GUARD_REPAIR_APPLY"
+  guard_repair_plan_rows | tee "$GUARD_REPAIR_REPORT_FILE"
+
+  if [ "$CFST_GUARD_REPAIR_APPLY" != "1" ]; then
+    log "guard-repair: dry-run only; set CFST_GUARD_REPAIR_APPLY=1 to update Cloudflare DNS"
+    return 0
+  fi
+
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $3}' "$GUARD_REPAIR_REPORT_FILE" |
+    while IFS="$(printf '\t')" read -r name ip; do
+      [ -n "$name" ] && [ -n "$ip" ] || continue
+      upsert_single_dns_record "$name" "$ip"
+      sleep 1
+    done
+}
+
 identify_reverse_ip_regions() {
   [ "$CDN_IP_MODE" = "reverse" ] || return 0
   log "反代 IP：开始识别前 10 个优选 IP 的国家/地区"
@@ -2167,6 +2250,8 @@ health_check_command() {
     printf 'CFST_EXPOSED_SLOT_MIN_SPEED=%s\n' "$CFST_EXPOSED_SLOT_MIN_SPEED"
     printf 'CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=%s\n' "$CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS"
     printf 'EXPOSED_SLOT_GUARD_STATE_FILE=%s\n' "$EXPOSED_SLOT_GUARD_STATE_FILE"
+    printf 'CFST_GUARD_REPAIR_APPLY=%s\n' "$CFST_GUARD_REPAIR_APPLY"
+    printf 'GUARD_REPAIR_REPORT_FILE=%s\n' "$GUARD_REPAIR_REPORT_FILE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"
@@ -2511,6 +2596,7 @@ main() {
     external-candidate-check) external_candidate_check_command ;;
     external-observe) external_observe_command ;;
     observation-report) observation_report_command ;;
+    guard-repair) guard_repair_command ;;
     stability-update) stability_update_command ;;
     stability-verify) stability_verify_command ;;
     delete-records) delete_records_command ;;
