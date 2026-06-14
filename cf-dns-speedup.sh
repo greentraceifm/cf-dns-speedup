@@ -10,6 +10,7 @@ STABILITY_RESULT_FILE="${STABILITY_RESULT_FILE:-$APP_DIR/result.stability.tsv}"
 STABILITY_VERIFY_RESULT_FILE="${STABILITY_VERIFY_RESULT_FILE:-$APP_DIR/result.stability.verify.tsv}"
 HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
+EXPOSED_SLOT_GUARD_STATE_FILE="${EXPOSED_SLOT_GUARD_STATE_FILE:-$APP_DIR/exposed-slot-guard.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -116,6 +117,9 @@ load_config() {
   CFST_STABLE_SLOT_AVOID_REGEX="${CFST_STABLE_SLOT_AVOID_REGEX:-$CFST_PRIMARY_AVOID_REGEX}"
   CFST_STABLE_SLOT_ALLOW_CHALLENGER="${CFST_STABLE_SLOT_ALLOW_CHALLENGER:-0}"
   CFST_STABLE_SLOT_ALLOW_AVOID="${CFST_STABLE_SLOT_ALLOW_AVOID:-0}"
+  CFST_EXPOSED_SLOT_GUARD="${CFST_EXPOSED_SLOT_GUARD:-1}"
+  CFST_EXPOSED_SLOT_MIN_SPEED="${CFST_EXPOSED_SLOT_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
+  CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -1522,16 +1526,19 @@ selected_result_rows() {
 }
 
 selected_dns_rows() {
-  if [ "${CFST_EXPOSED_SLOT_GUARD:-1}" != "1" ] || [ ! -s "$VALIDATE_RESULT_FILE" ]; then
+  if [ "${CFST_EXPOSED_SLOT_GUARD:-1}" != "1" ] || { [ ! -s "$VALIDATE_RESULT_FILE" ] && [ ! -s "$EXPOSED_SLOT_GUARD_STATE_FILE" ]; }; then
     selected_result_rows
     return 0
   fi
 
   selected_result_rows | awk -F '\t' \
     -v validate_file="$VALIDATE_RESULT_FILE" \
+    -v state_file="$EXPOSED_SLOT_GUARD_STATE_FILE" \
     -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
     -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" \
-    -v rounds="${VALIDATE_CURRENT_ROUNDS:-${CFST_STABILITY_TEST_ROUNDS:-0}}" '
+    -v rounds="${VALIDATE_CURRENT_ROUNDS:-${CFST_STABILITY_TEST_ROUNDS:-0}}" \
+    -v now_epoch="$(date '+%s')" \
+    -v block_ttl="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}" '
     BEGIN {
       while ((getline row < validate_file) > 0) {
         split(row, f, "\t")
@@ -1540,6 +1547,17 @@ selected_dns_rows() {
         validate_ok[f[1]]=f[6]+0
       }
       close(validate_file)
+      while ((getline row < state_file) > 0) {
+        gsub(/\r/, "", row)
+        split(row, f, "\t")
+        if (f[1] == "updated_at_epoch" || f[3] == "") continue
+        age=now_epoch - (f[1]+0)
+        if (f[5] == "blocked" && age >= 0 && age <= block_ttl) {
+          blocked[f[3]]=1
+          blocked_min[f[3]]=f[4]+0
+        }
+      }
+      close(state_file)
     }
     $1 != "" {
       line[++n]=$0
@@ -1547,6 +1565,7 @@ selected_dns_rows() {
       speed[n]=$3+0
       effective=speed[n]
       if (ip[n] in validate_min) effective=validate_min[ip[n]]
+      if (ip[n] in blocked && (!(ip[n] in validate_min) || validate_min[ip[n]] < min_speed)) effective=blocked_min[ip[n]]
       effective_speed[n]=effective
       ok_rounds[n]=(ip[n] in validate_ok) ? validate_ok[ip[n]] : rounds
       if (n <= stable_slots) fallback[++fallback_count]=n
@@ -1562,6 +1581,73 @@ selected_dns_rows() {
       }
     }
   '
+}
+
+refresh_exposed_slot_guard_state() {
+  [ "${CFST_EXPOSED_SLOT_GUARD:-1}" = "1" ] || return 0
+  [ -s "$STABILITY_RESULT_FILE" ] || return 0
+  [ -s "$VALIDATE_RESULT_FILE" ] || return 0
+
+  local tmp_file now_epoch now_text
+  tmp_file="$EXPOSED_SLOT_GUARD_STATE_FILE.tmp.$$"
+  now_epoch="$(date '+%s')"
+  now_text="$(date '+%F %T')"
+
+  selected_result_rows | awk -F '\t' \
+    -v validate_file="$VALIDATE_RESULT_FILE" \
+    -v state_file="$EXPOSED_SLOT_GUARD_STATE_FILE" \
+    -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" \
+    -v rounds="${VALIDATE_CURRENT_ROUNDS:-${CFST_STABILITY_TEST_ROUNDS:-0}}" \
+    -v now_epoch="$now_epoch" \
+    -v now_text="$now_text" \
+    -v block_ttl="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}" '
+    function remember(ip, epoch, text, min, status, reason) {
+      if (ip == "") return
+      if (!(ip in ordered)) order[++order_count]=ip
+      ordered[ip]=1
+      row_epoch[ip]=epoch
+      row_text[ip]=text
+      row_min[ip]=min
+      row_status[ip]=status
+      row_reason[ip]=reason
+    }
+    BEGIN {
+      while ((getline row < state_file) > 0) {
+        gsub(/\r/, "", row)
+        split(row, f, "\t")
+        if (f[1] == "updated_at_epoch" || f[3] == "") continue
+        age=now_epoch - (f[1]+0)
+        if (age >= 0 && age <= block_ttl) remember(f[3], f[1], f[2], f[4], f[5], f[6])
+      }
+      close(state_file)
+      while ((getline row < validate_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "ip" || f[1] == "") continue
+        validate_min[f[1]]=f[4]+0
+        validate_ok[f[1]]=f[6]+0
+      }
+      close(validate_file)
+    }
+    $1 != "" {
+      slot++
+      if (slot <= stable_slots || !($1 in validate_min)) next
+      if (validate_min[$1] < min_speed || (rounds > 0 && validate_ok[$1] < rounds)) {
+        remember($1, now_epoch, now_text, validate_min[$1], "blocked", "degraded_exposed_slot")
+      } else {
+        remember($1, now_epoch, now_text, validate_min[$1], "passed", "validated_exposed_slot")
+      }
+    }
+    END {
+      print "updated_at_epoch\tupdated_at\tip\teffective_min_mbps\tstatus\treason"
+      for (i=1; i<=order_count; i++) {
+        ip=order[i]
+        printf "%s\t%s\t%s\t%.2f\t%s\t%s\n", row_epoch[ip], row_text[ip], ip, row_min[ip]+0, row_status[ip], row_reason[ip]
+      }
+    }
+  ' > "$tmp_file"
+
+  mv "$tmp_file" "$EXPOSED_SLOT_GUARD_STATE_FILE"
 }
 
 show_best_ips() {
@@ -1907,8 +1993,11 @@ print_exposed_slot_guard() {
   selected_result_rows | awk -F '\t' \
     -v guarded_file="$guarded_file" \
     -v validate_file="$VALIDATE_RESULT_FILE" \
+    -v state_file="$EXPOSED_SLOT_GUARD_STATE_FILE" \
     -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
-    -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" '
+    -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" \
+    -v now_epoch="$(date '+%s')" \
+    -v block_ttl="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}" '
     BEGIN {
       while ((getline row < guarded_file) > 0) {
         split(row, f, "\t")
@@ -1921,11 +2010,23 @@ print_exposed_slot_guard() {
         validate_min[f[1]]=f[4]+0
       }
       close(validate_file)
+      while ((getline row < state_file) > 0) {
+        gsub(/\r/, "", row)
+        split(row, f, "\t")
+        if (f[1] == "updated_at_epoch" || f[3] == "") continue
+        age=now_epoch - (f[1]+0)
+        if (f[5] == "blocked" && age >= 0 && age <= block_ttl) {
+          blocked[f[3]]=1
+          blocked_min[f[3]]=f[4]+0
+        }
+      }
+      close(state_file)
     }
     $1 != "" {
       slot++
       effective=$3+0
       if ($1 in validate_min) effective=validate_min[$1]
+      if ($1 in blocked && (!($1 in validate_min) || validate_min[$1] < min_speed)) effective=blocked_min[$1]
       dns_ip=guarded_ip[slot] == "" ? $1 : guarded_ip[slot]
       if (slot <= stable_slots) status="primary"
       else if (dns_ip != $1) status="mirrored"
@@ -2062,6 +2163,10 @@ health_check_command() {
     printf 'CFST_PRIMARY_DEGRADE_PROTECTION=%s\n' "$CFST_PRIMARY_DEGRADE_PROTECTION"
     printf 'CFST_PRIMARY_DEGRADE_MIN_SPEED=%s\n' "$CFST_PRIMARY_DEGRADE_MIN_SPEED"
     printf 'CFST_PRIMARY_GUARD_ENFORCE=%s\n' "$CFST_PRIMARY_GUARD_ENFORCE"
+    printf 'CFST_EXPOSED_SLOT_GUARD=%s\n' "$CFST_EXPOSED_SLOT_GUARD"
+    printf 'CFST_EXPOSED_SLOT_MIN_SPEED=%s\n' "$CFST_EXPOSED_SLOT_MIN_SPEED"
+    printf 'CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=%s\n' "$CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS"
+    printf 'EXPOSED_SLOT_GUARD_STATE_FILE=%s\n' "$EXPOSED_SLOT_GUARD_STATE_FILE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"
@@ -2153,6 +2258,7 @@ validate_current_impl() {
     ' "$raw_file" >> "$VALIDATE_RESULT_FILE"
   done < "$candidates"
 
+  refresh_exposed_slot_guard_state
   cat "$VALIDATE_RESULT_FILE"
 }
 

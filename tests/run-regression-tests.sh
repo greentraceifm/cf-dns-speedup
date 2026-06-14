@@ -32,6 +32,7 @@ APP_DIR="$TMP_DIR" . "$TMP_DIR/lib.sh"
 APP_DIR="$TMP_DIR"
 OBSERVATION_HISTORY_FILE="$TMP_DIR/observation-history.tsv"
 STABILITY_RESULT_FILE="$TMP_DIR/result.stability.tsv"
+EXPOSED_SLOT_GUARD_STATE_FILE="$TMP_DIR/exposed-slot-guard.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
 
@@ -57,6 +58,9 @@ CFST_PRIMARY_QUORUM_RECENT_PASSES=2
 CFST_PRIMARY_DEGRADE_PROTECTION=1
 CFST_PRIMARY_DEGRADE_MIN_SPEED=2
 CFST_PRIMARY_GUARD_ENFORCE=1
+CFST_EXPOSED_SLOT_GUARD=1
+CFST_EXPOSED_SLOT_MIN_SPEED=6.5
+CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=43200
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
@@ -111,6 +115,17 @@ DNS_SLOT5="$(best_ip_list | awk 'NR == 5 {print $1}')"
 [ "$DNS_SLOT5" = "104.17.10.2" ] || fail "exposed slot guard should mirror slot 5 to second stable IP, got $DNS_SLOT5"
 print_exposed_slot_guard | awk -F '\t' 'NR > 1 && $5 == "mirrored" {mirrored++} END {exit mirrored >= 2 ? 0 : 1}' \
   || fail "exposed slot guard should report mirrored competitive slots"
+refresh_exposed_slot_guard_state
+awk -F '\t' '$3 == "172.67.76.149" && $5 == "blocked" {found=1} END {exit found ? 0 : 1}' "$EXPOSED_SLOT_GUARD_STATE_FILE" \
+  || fail "exposed slot guard state did not remember degraded competitive IP"
+cat > "$VALIDATE_RESULT_FILE" <<'EOF'
+ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+104.17.10.1	0	0	8.00	8.50	2
+104.17.10.2	0	0	8.00	8.50	2
+104.17.10.3	0	0	8.00	8.50	2
+EOF
+DNS_SLOT4_AFTER_REPAIR="$(best_ip_list | awk 'NR == 4 {print $1}')"
+[ "$DNS_SLOT4_AFTER_REPAIR" = "104.17.10.1" ] || fail "exposed slot guard state should keep degraded IP mirrored after DNS repair, got $DNS_SLOT4_AFTER_REPAIR"
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "exposed slot guard mirrors degraded competitive slots"
 
