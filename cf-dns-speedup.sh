@@ -1521,6 +1521,49 @@ selected_result_rows() {
   ' "$RESULT_FILE"
 }
 
+selected_dns_rows() {
+  if [ "${CFST_EXPOSED_SLOT_GUARD:-1}" != "1" ] || [ ! -s "$VALIDATE_RESULT_FILE" ]; then
+    selected_result_rows
+    return 0
+  fi
+
+  selected_result_rows | awk -F '\t' \
+    -v validate_file="$VALIDATE_RESULT_FILE" \
+    -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" \
+    -v rounds="${VALIDATE_CURRENT_ROUNDS:-${CFST_STABILITY_TEST_ROUNDS:-0}}" '
+    BEGIN {
+      while ((getline row < validate_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "ip" || f[1] == "") continue
+        validate_min[f[1]]=f[4]+0
+        validate_ok[f[1]]=f[6]+0
+      }
+      close(validate_file)
+    }
+    $1 != "" {
+      line[++n]=$0
+      ip[n]=$1
+      speed[n]=$3+0
+      effective=speed[n]
+      if (ip[n] in validate_min) effective=validate_min[ip[n]]
+      effective_speed[n]=effective
+      ok_rounds[n]=(ip[n] in validate_ok) ? validate_ok[ip[n]] : rounds
+      if (n <= stable_slots) fallback[++fallback_count]=n
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        if (i > stable_slots && fallback_count > 0 && (effective_speed[i] < min_speed || (rounds > 0 && ok_rounds[i] < rounds))) {
+          fallback_idx=((i - stable_slots - 1) % fallback_count) + 1
+          print line[fallback[fallback_idx]]
+        } else {
+          print line[i]
+        }
+      }
+    }
+  '
+}
+
 show_best_ips() {
   log "优选结果：前 $CFST_RESULT_COUNT 个 IP"
   selected_result_rows | awk -F '\t' '{printf "%d. %s  延迟:%s  速度:%s\n", NR, $1, $2, $3}' | tee -a "$LOG_FILE" "$INFORM_LOG"
@@ -1528,6 +1571,15 @@ show_best_ips() {
 
 best_ip_list() {
   selected_result_rows | awk -F '\t' '{print $1}'
+}
+
+show_best_ips() {
+  log "preferred result: top $CFST_RESULT_COUNT IPs"
+  selected_dns_rows | awk -F '\t' '{printf "%d. %s  latency:%s  speed:%s\n", NR, $1, $2, $3}' | tee -a "$LOG_FILE" "$INFORM_LOG"
+}
+
+best_ip_list() {
+  selected_dns_rows | awk -F '\t' '{print $1}'
 }
 
 record_type_for_ip() {
@@ -1842,6 +1894,49 @@ print_dns_health() {
   done
 }
 
+print_exposed_slot_guard() {
+  [ -s "$STABILITY_RESULT_FILE" ] || {
+    echo "exposed_slot_guard unavailable: missing $STABILITY_RESULT_FILE"
+    return 0
+  }
+
+  local guarded_file
+  guarded_file="$APP_DIR/exposed-slot-guard.dns.$$"
+  selected_dns_rows > "$guarded_file"
+  printf 'slot\tselected_ip\tdns_ip\teffective_min_mbps\tstatus\n'
+  selected_result_rows | awk -F '\t' \
+    -v guarded_file="$guarded_file" \
+    -v validate_file="$VALIDATE_RESULT_FILE" \
+    -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" '
+    BEGIN {
+      while ((getline row < guarded_file) > 0) {
+        split(row, f, "\t")
+        guarded_ip[++guarded_count]=f[1]
+      }
+      close(guarded_file)
+      while ((getline row < validate_file) > 0) {
+        split(row, f, "\t")
+        if (f[1] == "ip" || f[1] == "") continue
+        validate_min[f[1]]=f[4]+0
+      }
+      close(validate_file)
+    }
+    $1 != "" {
+      slot++
+      effective=$3+0
+      if ($1 in validate_min) effective=validate_min[$1]
+      dns_ip=guarded_ip[slot] == "" ? $1 : guarded_ip[slot]
+      if (slot <= stable_slots) status="primary"
+      else if (dns_ip != $1) status="mirrored"
+      else if (effective < min_speed) status="unsafe"
+      else status="exposed"
+      printf "%d\t%s\t%s\t%.2f\t%s\n", slot, $1, dns_ip, effective, status
+    }
+  '
+  rm -f "$guarded_file"
+}
+
 print_primary_slot_guard() {
   [ -s "$STABILITY_RESULT_FILE" ] || {
     echo "primary_slot_guard unavailable: missing $STABILITY_RESULT_FILE"
@@ -1977,8 +2072,14 @@ health_check_command() {
     echo "=== selected ==="
     selected_result_rows 2>/dev/null | head -n "$CFST_RESULT_COUNT" || true
     echo
+    echo "=== dns-selected ==="
+    selected_dns_rows 2>/dev/null | head -n "$CFST_RESULT_COUNT" || true
+    echo
     echo "=== stability ==="
     cat "$STABILITY_RESULT_FILE" 2>/dev/null || true
+    echo
+    echo "=== exposed-slot-guard ==="
+    print_exposed_slot_guard
     echo
     echo "=== primary-slot-guard ==="
     print_primary_slot_guard

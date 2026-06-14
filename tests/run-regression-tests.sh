@@ -88,6 +88,32 @@ echo "$TOP3" | grep -q '^104\.17\.200\.1$' && fail "unobserved challenger entere
 echo "$TOP3" | grep -q '^104\.17\.201\.1$' && fail "single-observation IP entered primary stable slots"
 pass "dual-pool keeps stale IP out of primary slots"
 
+ORIGINAL_STABILITY_RESULT_FILE="$STABILITY_RESULT_FILE"
+GUARDED_STABILITY_RESULT_FILE="$TMP_DIR/guarded-selected.tsv"
+{
+  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n'
+  cat "$TMP_DIR/selected.tsv"
+} > "$GUARDED_STABILITY_RESULT_FILE"
+STABILITY_RESULT_FILE="$GUARDED_STABILITY_RESULT_FILE"
+VALIDATE_RESULT_FILE="$TMP_DIR/validate-current.latest.tsv"
+awk -F '\t' '
+  BEGIN {print "ip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds"}
+  {
+    min = NR <= 3 ? 8.00 : 0.25
+    avg = NR <= 3 ? 8.50 : 0.40
+    ok = 2
+    printf "%s\t0\t0\t%.2f\t%.2f\t%d\n", $1, min, avg, ok
+  }
+' "$TMP_DIR/selected.tsv" > "$VALIDATE_RESULT_FILE"
+DNS_SLOT4="$(best_ip_list | awk 'NR == 4 {print $1}')"
+DNS_SLOT5="$(best_ip_list | awk 'NR == 5 {print $1}')"
+[ "$DNS_SLOT4" = "104.17.10.1" ] || fail "exposed slot guard should mirror slot 4 to first stable IP, got $DNS_SLOT4"
+[ "$DNS_SLOT5" = "104.17.10.2" ] || fail "exposed slot guard should mirror slot 5 to second stable IP, got $DNS_SLOT5"
+print_exposed_slot_guard | awk -F '\t' 'NR > 1 && $5 == "mirrored" {mirrored++} END {exit mirrored >= 2 ? 0 : 1}' \
+  || fail "exposed slot guard should report mirrored competitive slots"
+STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
+pass "exposed slot guard mirrors degraded competitive slots"
+
 GUARD_STATUS="$(print_primary_slot_guard | awk -F '\t' '$2 == "104.26.2.86" {print $6}')"
 [ "$GUARD_STATUS" = "degraded" ] || fail "primary-slot guard should report degraded IP, got ${GUARD_STATUS:-missing}"
 pass "primary-slot guard reports degraded primary slots"
