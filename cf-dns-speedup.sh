@@ -124,6 +124,8 @@ load_config() {
   CFST_GUARD_REPAIR_APPLY="${CFST_GUARD_REPAIR_APPLY:-0}"
   CFST_GUARD_REPAIR_CURRENT_FILE="${CFST_GUARD_REPAIR_CURRENT_FILE:-}"
   CFST_OBSERVE_GUARD_REPAIR_REPORT="${CFST_OBSERVE_GUARD_REPAIR_REPORT:-1}"
+  CFST_OBSERVE_GUARD_REPAIR_APPLY="${CFST_OBSERVE_GUARD_REPAIR_APPLY:-0}"
+  CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES="${CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES:-2}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -1063,43 +1065,43 @@ apply_dual_pool_slots() {
     function add_group(arr, count, limit, i) {
       for (i=1; i<=count && emitted<limit; i++) add_pick(arr[i])
     }
-    function quorum_pass(ip, recent_start, passes) {
+    function quorum_pass(target_ip, recent_start, passes) {
       if (quorum_mode != "1") return 1
-      if (obs_count[ip] < quorum_min_obs) return 0
-      recent_start=obs_count[ip] - recent_window + 1
+      if (obs_count[target_ip] < quorum_min_obs) return 0
+      recent_start=obs_count[target_ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       passes=0
-      for (k=recent_start; k<=obs_count[ip]; k++) {
-        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      for (k=recent_start; k<=obs_count[target_ip]; k++) {
+        if (obs_min[target_ip,k] >= fallback_min_speed && obs_ok[target_ip,k] >= 1) passes++
       }
       return passes >= quorum_recent_passes
     }
-    function classify(ip, recent_start, recent_lows) {
-      if (obs_count[ip] == 0) return "challenger"
-      recent_start=obs_count[ip] - recent_window + 1
+    function classify(target_ip, recent_start, recent_lows) {
+      if (obs_count[target_ip] == 0) return "challenger"
+      recent_start=obs_count[target_ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       recent_lows=0
-      for (k=recent_start; k<=obs_count[ip]; k++) if (obs_min[ip,k] < fallback_min_speed || obs_ok[ip,k] < 1) recent_lows++
-      if (obs_low[ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
-      if (obs_low[ip] <= stable_max_low && obs_recent_min[ip] >= fallback_min_speed && obs_recent_ok[ip] >= 1) return "stable"
+      for (k=recent_start; k<=obs_count[target_ip]; k++) if (obs_min[target_ip,k] < fallback_min_speed || obs_ok[target_ip,k] < 1) recent_lows++
+      if (obs_low[target_ip] >= stale_low_count || recent_lows >= recent_window) return "stale"
+      if (obs_low[target_ip] <= stable_max_low && obs_recent_min[target_ip] >= fallback_min_speed && obs_recent_ok[target_ip] >= 1) return "stable"
       return "watch"
     }
     function stable_score(idx, health, score) {
       health=health_status[idx]
-      score=(obs_avg_min[ip[idx]] * 0.60) + (current_min[idx] * 0.30) + (cfst_speed[idx] * 0.10)
+      score=(obs_avg_min[cand_ip[idx]] * 0.60) + (current_min[idx] * 0.30) + (cfst_speed[idx] * 0.10)
       if (health == "stable") score += 20
       else if (health == "watch") score += 5
       else if (health == "stale") score -= 1000
       else score -= 10
-      if (ip[idx] ~ prefer_regex) score += 2
-      if (ip[idx] ~ avoid_regex) score -= 5
+      if (cand_ip[idx] ~ prefer_regex) score += 2
+      if (cand_ip[idx] ~ avoid_regex) score -= 5
       return score
     }
     function competitive_score(idx, health, score) {
       health=health_status[idx]
-      score=(current_min[idx] * 0.60) + (cfst_speed[idx] * 0.30) + (obs_avg_min[ip[idx]] * 0.10)
+      score=(current_min[idx] * 0.60) + (cfst_speed[idx] * 0.30) + (obs_avg_min[cand_ip[idx]] * 0.10)
       if (health == "stale") score -= 100
-      if (ip[idx] ~ avoid_regex) score -= 1
+      if (cand_ip[idx] ~ avoid_regex) score -= 1
       return score
     }
     BEGIN {
@@ -1121,7 +1123,7 @@ apply_dual_pool_slots() {
     }
     $1 != "" {
       line[++n]=$0
-      ip[n]=$1
+      cand_ip[n]=$1
       latency[n]=$2+0
       cfst_speed[n]=$3+0
       current_min[n]=$4+0
@@ -1129,10 +1131,10 @@ apply_dual_pool_slots() {
       ok_rounds[n]=$6+0
       source[n]=$7
       enough_rounds=(rounds <= 0 || ok_rounds[n] >= rounds)
-      health_status[n]=classify(ip[n])
+      health_status[n]=classify(cand_ip[n])
       stable_rank[n]=stable_score(n)
       competitive_rank[n]=competitive_score(n)
-      primary_ok=(current_min[n] >= fallback_min_speed && enough_rounds && quorum_pass(ip[n]) && (degrade_protection != "1" || current_min[n] >= degrade_min_speed))
+      primary_ok=(current_min[n] >= fallback_min_speed && enough_rounds && quorum_pass(cand_ip[n]) && (degrade_protection != "1" || current_min[n] >= degrade_min_speed))
       if (primary_ok && health_status[n] == "stable") stable[++stable_count]=n
       else if (primary_ok && health_status[n] == "watch") watch[++watch_count]=n
       else if (health_status[n] != "stale") competitive[++competitive_count]=n
@@ -1158,7 +1160,7 @@ apply_dual_pool_slots() {
       add_group(watch, watch_count, stable_slots)
       for (i=1; i<=competitive_count && emitted<stable_slots; i++) {
         idx=competitive[i]
-        if (allow_challenger == "1" && (allow_avoid == "1" || ip[idx] !~ avoid_regex)) add_pick(idx)
+        if (allow_challenger == "1" && (allow_avoid == "1" || cand_ip[idx] !~ avoid_regex)) add_pick(idx)
       }
       add_group(competitive, competitive_count, result_count)
       add_group(stable, stable_count, result_count)
@@ -1187,14 +1189,14 @@ promote_primary_safe_candidate() {
     -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" \
     -v degrade_protection="${CFST_PRIMARY_DEGRADE_PROTECTION:-1}" \
     -v degrade_min_speed="${CFST_PRIMARY_DEGRADE_MIN_SPEED:-2}" '
-    function quorum_pass(ip, recent_start, passes) {
+    function quorum_pass(target_ip, recent_start, passes) {
       if (quorum_mode != "1") return 1
-      if (count[ip] < quorum_min_obs) return 0
-      recent_start=count[ip] - recent_window + 1
+      if (count[target_ip] < quorum_min_obs) return 0
+      recent_start=count[target_ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       passes=0
-      for (k=recent_start; k<=count[ip]; k++) {
-        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      for (k=recent_start; k<=count[target_ip]; k++) {
+        if (obs_min[target_ip,k] >= fallback_min_speed && obs_ok[target_ip,k] >= 1) passes++
       }
       return passes >= quorum_recent_passes
     }
@@ -1213,7 +1215,7 @@ promote_primary_safe_candidate() {
     }
     $1 != "" {
       line[++n]=$0
-      ip[n]=$1
+      cand_ip[n]=$1
       speed[n]=$4+0
       active=(speed[n] >= fallback_min_speed && (allow_challenger == "1" || count[$1] > 0) && low[$1] == 0 && quorum_pass($1) && (degrade_protection != "1" || speed[n] >= degrade_min_speed))
       if (active && $1 ~ prefer_regex) {
@@ -1264,14 +1266,14 @@ promote_stable_slots() {
       print line[idx]
       emitted++
     }
-    function quorum_pass(ip, recent_start, passes) {
+    function quorum_pass(target_ip, recent_start, passes) {
       if (quorum_mode != "1") return 1
-      if (obs_count[ip] < quorum_min_obs) return 0
-      recent_start=obs_count[ip] - recent_window + 1
+      if (obs_count[target_ip] < quorum_min_obs) return 0
+      recent_start=obs_count[target_ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       passes=0
-      for (k=recent_start; k<=obs_count[ip]; k++) {
-        if (obs_min[ip,k] >= fallback_min_speed && obs_ok[ip,k] >= 1) passes++
+      for (k=recent_start; k<=obs_count[target_ip]; k++) {
+        if (obs_min[target_ip,k] >= fallback_min_speed && obs_ok[target_ip,k] >= 1) passes++
       }
       return passes >= quorum_recent_passes
     }
@@ -1292,7 +1294,7 @@ promote_stable_slots() {
     }
     $1 != "" {
       line[++n]=$0
-      ip[n]=$1
+      cand_ip[n]=$1
       current_min[n]=$4+0
       ok[n]=$6+0
       enough_rounds=(rounds <= 0 || ok[n] >= rounds)
@@ -1565,13 +1567,13 @@ selected_dns_rows() {
     }
     $1 != "" {
       line[++n]=$0
-      ip[n]=$1
+      row_ip[n]=$1
       speed[n]=$3+0
       effective=speed[n]
-      if (ip[n] in validate_min) effective=validate_min[ip[n]]
-      if (ip[n] in blocked && (!(ip[n] in validate_min) || validate_min[ip[n]] < min_speed)) effective=blocked_min[ip[n]]
+      if (row_ip[n] in validate_min) effective=validate_min[row_ip[n]]
+      if (row_ip[n] in blocked && (!(row_ip[n] in validate_min) || validate_min[row_ip[n]] < min_speed)) effective=blocked_min[row_ip[n]]
       effective_speed[n]=effective
-      ok_rounds[n]=(ip[n] in validate_ok) ? validate_ok[ip[n]] : rounds
+      ok_rounds[n]=(row_ip[n] in validate_ok) ? validate_ok[row_ip[n]] : rounds
       if (n <= stable_slots) fallback[++fallback_count]=n
     }
     END {
@@ -1947,6 +1949,25 @@ guard_repair_command() {
     done
 }
 
+guard_repair_update_count() {
+  [ -s "$GUARD_REPAIR_REPORT_FILE" ] || {
+    echo 0
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {count++} END {print count+0}' "$GUARD_REPAIR_REPORT_FILE"
+}
+
+apply_guard_repair_report_updates() {
+  [ -s "$GUARD_REPAIR_REPORT_FILE" ] || die "guard-repair report is missing: $GUARD_REPAIR_REPORT_FILE"
+  check_cloudflare_auth
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $3}' "$GUARD_REPAIR_REPORT_FILE" |
+    while IFS="$(printf '\t')" read -r name ip; do
+      [ -n "$name" ] && [ -n "$ip" ] || continue
+      upsert_single_dns_record "$name" "$ip"
+      sleep 1
+    done
+}
+
 identify_reverse_ip_regions() {
   [ "$CDN_IP_MODE" = "reverse" ] || return 0
   log "反代 IP：开始识别前 10 个优选 IP 的国家/地区"
@@ -2253,6 +2274,8 @@ health_check_command() {
     printf 'EXPOSED_SLOT_GUARD_STATE_FILE=%s\n' "$EXPOSED_SLOT_GUARD_STATE_FILE"
     printf 'CFST_GUARD_REPAIR_APPLY=%s\n' "$CFST_GUARD_REPAIR_APPLY"
     printf 'CFST_OBSERVE_GUARD_REPAIR_REPORT=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_REPORT"
+    printf 'CFST_OBSERVE_GUARD_REPAIR_APPLY=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_APPLY"
+    printf 'CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES"
     printf 'GUARD_REPAIR_REPORT_FILE=%s\n' "$GUARD_REPAIR_REPORT_FILE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
@@ -2377,6 +2400,23 @@ observe_current_command() {
     echo "=== guard-repair-dry-run ==="
     guard_repair_plan_rows | tee "$GUARD_REPAIR_REPORT_FILE"
     echo
+    if [ "${CFST_OBSERVE_GUARD_REPAIR_APPLY:-0}" = "1" ]; then
+      local repair_updates
+      repair_updates="$(guard_repair_update_count)"
+      echo "=== guard-repair-auto-apply ==="
+      printf 'updates=%s\n' "$repair_updates"
+      printf 'max_updates=%s\n' "${CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES:-2}"
+      if [ "$repair_updates" -eq 0 ]; then
+        echo "status=skipped_no_updates"
+      elif [ "$repair_updates" -le "${CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES:-2}" ]; then
+        echo "status=applying"
+        apply_guard_repair_report_updates
+        echo "status=applied"
+      else
+        echo "status=blocked_too_many_updates"
+      fi
+      echo
+    fi
   fi
   printf 'observation_history=%s\n' "$OBSERVATION_HISTORY_FILE"
 }

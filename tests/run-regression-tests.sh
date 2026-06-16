@@ -63,6 +63,8 @@ CFST_EXPOSED_SLOT_MIN_SPEED=6.5
 CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=43200
 CFST_GUARD_REPAIR_APPLY=0
 CFST_OBSERVE_GUARD_REPAIR_REPORT=1
+CFST_OBSERVE_GUARD_REPAIR_APPLY=0
+CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES=2
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
@@ -143,6 +145,21 @@ awk -F '\t' '$1 == "auto3.example.test" && $2 == "172.67.76.149" && $3 == "104.1
   || fail "guard-repair should plan auto3 update to mirrored stable slot"
 awk -F '\t' '$1 == "auto4.example.test" && $2 == "104.26.2.86" && $3 == "104.17.10.2" && $4 == "update" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/guard-repair-plan.tsv" \
   || fail "guard-repair should plan auto4 update to mirrored stable slot"
+cp "$TMP_DIR/guard-repair-plan.tsv" "$GUARD_REPAIR_REPORT_FILE"
+[ "$(guard_repair_update_count)" = "2" ] || fail "guard-repair update count should be 2"
+check_cloudflare_auth() {
+  :
+}
+upsert_single_dns_record() {
+  printf '%s\t%s\n' "$1" "$2" >> "$TMP_DIR/applied-dns.tsv"
+}
+apply_guard_repair_report_updates
+awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.1" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/applied-dns.tsv" \
+  || fail "guard-repair auto apply should update auto3 to stable mirror"
+awk -F '\t' '$1 == "auto4.example.test" && $2 == "104.17.10.2" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/applied-dns.tsv" \
+  || fail "guard-repair auto apply should update auto4 to stable mirror"
+awk -F '\t' '$1 == "auto.example.test" || $1 == "auto1.example.test" || $1 == "auto2.example.test" {bad=1} END {exit bad ? 1 : 0}' "$TMP_DIR/applied-dns.tsv" \
+  || fail "guard-repair auto apply should not rewrite primary slots"
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "exposed slot guard mirrors degraded competitive slots"
 
