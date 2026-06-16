@@ -62,6 +62,7 @@ CFST_EXPOSED_SLOT_GUARD=1
 CFST_EXPOSED_SLOT_MIN_SPEED=6.5
 CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=43200
 CFST_GUARD_REPAIR_APPLY=0
+CFST_OBSERVE_GUARD_REPAIR_REPORT=1
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
@@ -191,6 +192,7 @@ awk -F '\t' '$1 == "104.17.10.1" && $13 == "stable" && $18 == "1" {found=1} END 
 awk -F '\t' '$1 == "104.17.10.4" && $9 == "stable" && $13 == "stable" && $18 == "1" {found=1} END {exit found ? 0 : 1}' "$CHAMPION_POOL_FILE" \
   || fail "fallback-quorum stable IP was not promotion_ready"
 grep -q '^print_champion_summary()' "$SCRIPT" || fail "champion summary function is missing"
+grep -q 'guard-repair-dry-run' "$SCRIPT" || fail "observe-current guard-repair dry-run report is missing"
 pass "champion lifecycle fields are generated consistently"
 
 echo "all regression tests passed"
