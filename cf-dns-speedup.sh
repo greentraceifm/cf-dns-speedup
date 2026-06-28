@@ -12,6 +12,8 @@ HEALTH_REPORT_FILE="${HEALTH_REPORT_FILE:-$APP_DIR/health-check.latest.txt}"
 VALIDATE_RESULT_FILE="${VALIDATE_RESULT_FILE:-$APP_DIR/validate-current.latest.tsv}"
 EXPOSED_SLOT_GUARD_STATE_FILE="${EXPOSED_SLOT_GUARD_STATE_FILE:-$APP_DIR/exposed-slot-guard.tsv}"
 GUARD_REPAIR_REPORT_FILE="${GUARD_REPAIR_REPORT_FILE:-$APP_DIR/guard-repair.latest.tsv}"
+EMERGENCY_REFRESH_REPORT_FILE="${EMERGENCY_REFRESH_REPORT_FILE:-$APP_DIR/emergency-refresh.latest.tsv}"
+EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/emergency-refresh.validate.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -122,10 +124,20 @@ load_config() {
   CFST_EXPOSED_SLOT_MIN_SPEED="${CFST_EXPOSED_SLOT_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
   CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS="${CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS:-43200}"
   CFST_GUARD_REPAIR_APPLY="${CFST_GUARD_REPAIR_APPLY:-0}"
+  CFST_GUARD_REPAIR_STABLE_MIRROR="${CFST_GUARD_REPAIR_STABLE_MIRROR:-1}"
   CFST_GUARD_REPAIR_CURRENT_FILE="${CFST_GUARD_REPAIR_CURRENT_FILE:-}"
   CFST_OBSERVE_GUARD_REPAIR_REPORT="${CFST_OBSERVE_GUARD_REPAIR_REPORT:-1}"
   CFST_OBSERVE_GUARD_REPAIR_APPLY="${CFST_OBSERVE_GUARD_REPAIR_APPLY:-0}"
   CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES="${CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES:-2}"
+  CFST_EMERGENCY_REFRESH="${CFST_EMERGENCY_REFRESH:-1}"
+  CFST_EMERGENCY_REFRESH_APPLY="${CFST_EMERGENCY_REFRESH_APPLY:-0}"
+  CFST_OBSERVE_EMERGENCY_REFRESH_APPLY="${CFST_OBSERVE_EMERGENCY_REFRESH_APPLY:-0}"
+  CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED="${CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED:-$CFST_PRIMARY_DEGRADE_MIN_SPEED}"
+  CFST_EMERGENCY_REFRESH_MIN_SPEED="${CFST_EMERGENCY_REFRESH_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
+  CFST_EMERGENCY_REFRESH_CANDIDATES="${CFST_EMERGENCY_REFRESH_CANDIDATES:-8}"
+  CFST_EMERGENCY_REFRESH_ROUNDS="${CFST_EMERGENCY_REFRESH_ROUNDS:-$CFST_STABILITY_TEST_ROUNDS}"
+  CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS="${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}"
+  CFST_EMERGENCY_REFRESH_MAX_UPDATES="${CFST_EMERGENCY_REFRESH_MAX_UPDATES:-5}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -1871,9 +1883,72 @@ update_cloudflare() {
 
 guard_repair_desired_rows() {
   [ -n "$CF_RECORD_NAMES" ] || die "guard-repair requires CF_RECORD_NAMES"
-  local ip_tmp i name ip
+  local ip_tmp current_tmp i name ip
   ip_tmp="$APP_DIR/guard-repair.desired.tmp"
   selected_dns_rows > "$ip_tmp"
+
+  if [ "${CFST_GUARD_REPAIR_STABLE_MIRROR:-1}" = "1" ] && [ -s "$VALIDATE_RESULT_FILE" ]; then
+    current_tmp="$APP_DIR/guard-repair.current-for-desired.tmp"
+    guard_repair_current_rows > "$current_tmp"
+    awk -F '\t' \
+      -v current_file="$current_tmp" \
+      -v validate_file="$VALIDATE_RESULT_FILE" \
+      -v stable_slots="${CFST_STABLE_SLOT_COUNT:-3}" \
+      -v min_speed="${CFST_EXPOSED_SLOT_MIN_SPEED:-${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}}" \
+      -v rounds="${VALIDATE_CURRENT_ROUNDS:-${CFST_STABILITY_TEST_ROUNDS:-0}}" '
+      BEGIN {
+        while ((getline row < current_file) > 0) {
+          split(row, f, "\t")
+          if (f[1] == "" || f[2] == "") continue
+          slot++
+          cur_ip[slot]=f[2]
+        }
+        close(current_file)
+        while ((getline row < validate_file) > 0) {
+          split(row, f, "\t")
+          if (f[1] == "ip" || f[1] == "") continue
+          validate_min[f[1]]=f[4]+0
+          validate_ok[f[1]]=f[6]+0
+        }
+        close(validate_file)
+      }
+      {
+        desired[++desired_count]=$1
+      }
+      END {
+        fallback_count=0
+        for (i=1; i<=stable_slots && i<=desired_count; i++) {
+          ip=cur_ip[i] != "" ? cur_ip[i] : desired[i]
+          mirror[i]=ip
+          if (ip != "") fallback[++fallback_count]=ip
+        }
+        for (i=1; i<=desired_count; i++) {
+          ip=desired[i]
+          if (i <= stable_slots && cur_ip[i] != "") {
+            ip=cur_ip[i]
+          }
+          if (i > stable_slots && fallback_count > 0) {
+            current=cur_ip[i] != "" ? cur_ip[i] : ip
+            idx=((i - stable_slots - 1) % fallback_count) + 1
+            mirror_ip=fallback[idx]
+            effective=(current in validate_min) ? validate_min[current] : ((ip in validate_min) ? validate_min[ip] : min_speed)
+            ok=(current in validate_ok) ? validate_ok[current] : ((ip in validate_ok) ? validate_ok[ip] : rounds)
+            if (effective < min_speed || (rounds > 0 && ok < rounds)) {
+              ip=mirror_ip
+            } else if (ip == mirror_ip) {
+              ip=mirror_ip
+            } else if (cur_ip[i] != "") {
+              ip=cur_ip[i]
+            }
+          }
+          print ip
+        }
+      }
+    ' "$ip_tmp" > "$ip_tmp.stable-mirror"
+    mv "$ip_tmp.stable-mirror" "$ip_tmp"
+    rm -f "$current_tmp"
+  fi
+
   i=1
   for name in $CF_RECORD_NAMES; do
     ip="$(sed -n "${i}p" "$ip_tmp")"
@@ -1968,6 +2043,236 @@ apply_guard_repair_report_updates() {
     done
 }
 
+emergency_refresh_primary_degraded() {
+  [ "${CFST_EMERGENCY_REFRESH:-1}" = "1" ] || return 1
+  [ -s "$VALIDATE_RESULT_FILE" ] || return 1
+  awk -F '\t' \
+    -v slot_count="${CFST_STABLE_SLOT_COUNT:-3}" \
+    -v trigger="${CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED:-2}" \
+    'NR > 1 && $1 != "" && seen < slot_count {
+       seen++
+       if (($4 + 0) > trigger) healthy++
+     }
+     END {
+       exit (seen >= slot_count && healthy == 0) ? 0 : 1
+     }' "$VALIDATE_RESULT_FILE"
+}
+
+emergency_refresh_candidate_rows() {
+  [ -s "$STABILITY_RESULT_FILE" ] || return 0
+  awk -F '\t' -v limit="${CFST_EMERGENCY_REFRESH_CANDIDATES:-8}" '
+    NR == 1 {next}
+    $1 != "" && !seen[$1]++ && count < limit {
+      print $1 "\t" $2 "\t" $3 "\t" $7
+      count++
+    }
+  ' "$STABILITY_RESULT_FILE"
+}
+
+emergency_refresh_validate_candidates() {
+  [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot emergency-refresh"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  local host candidates raw_file
+  host="$(cfst_url_host)"
+  [ -n "$host" ] || die "cannot parse host from CFST_URL"
+  candidates="$APP_DIR/emergency-refresh.candidates.tsv"
+  raw_file="$APP_DIR/emergency-refresh.raw"
+  emergency_refresh_candidate_rows > "$candidates"
+  [ -s "$candidates" ] || die "emergency-refresh has no candidates"
+
+  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n' > "$EMERGENCY_REFRESH_VALIDATE_FILE"
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed source; do
+    [ -n "$ip" ] || continue
+    local round ok speed_bps
+    : > "$raw_file"
+    round=1
+    ok=0
+    while [ "$round" -le "${CFST_EMERGENCY_REFRESH_ROUNDS:-2}" ]; do
+      speed_bps="$(download_speed_bps "$host" "$ip")"
+      if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
+        awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
+        ok=$((ok + 1))
+      else
+        printf '0.00\n' >> "$raw_file"
+      fi
+      round=$((round + 1))
+    done
+    awk -v ip="$ip" -v latency="$latency" -v cfst_speed="$cfst_speed" -v ok="$ok" -v source="$source" '
+      BEGIN {min = ""; sum = 0; count = 0}
+      {
+        speed = $1 + 0
+        if (min == "" || speed < min) min = speed
+        sum += speed
+        count++
+      }
+      END {
+        avg = count > 0 ? sum / count : 0
+        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\t%s\n", ip, latency, cfst_speed, min + 0, avg, ok, source
+      }
+    ' "$raw_file" >> "$EMERGENCY_REFRESH_VALIDATE_FILE"
+  done < "$candidates"
+}
+
+emergency_refresh_desired_rows() {
+  [ -n "$CF_RECORD_NAMES" ] || die "emergency-refresh requires CF_RECORD_NAMES"
+  [ -s "$EMERGENCY_REFRESH_VALIDATE_FILE" ] || die "emergency-refresh validation is missing"
+  local picked_file i name ip
+  picked_file="$APP_DIR/emergency-refresh.picked.tmp"
+  awk -F '\t' \
+    -v min_speed="${CFST_EMERGENCY_REFRESH_MIN_SPEED:-6.5}" \
+    -v rounds="${CFST_EMERGENCY_REFRESH_ROUNDS:-2}" \
+    -v slot_count="${CFST_STABLE_SLOT_COUNT:-3}" '
+    NR == 1 {next}
+    $1 != "" && ($4 + 0) >= min_speed && ($6 + 0) >= rounds {
+      line[++n]=$0
+      min_speed_v[n]=$4+0
+      avg_speed_v[n]=$5+0
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        best=i
+        for (j=i+1; j<=n; j++) {
+          if (min_speed_v[j] > min_speed_v[best] || (min_speed_v[j] == min_speed_v[best] && avg_speed_v[j] > avg_speed_v[best])) best=j
+        }
+        tmp=line[i]; line[i]=line[best]; line[best]=tmp
+        tmp=min_speed_v[i]; min_speed_v[i]=min_speed_v[best]; min_speed_v[best]=tmp
+        tmp=avg_speed_v[i]; avg_speed_v[i]=avg_speed_v[best]; avg_speed_v[best]=tmp
+      }
+      for (i=1; i<=n && i<=slot_count; i++) {
+        split(line[i], f, "\t")
+        print f[1]
+      }
+    }
+  ' "$EMERGENCY_REFRESH_VALIDATE_FILE" > "$picked_file"
+
+  i=1
+  for name in $CF_RECORD_NAMES; do
+    if [ "$i" -le "${CFST_STABLE_SLOT_COUNT:-3}" ]; then
+      ip="$(sed -n "${i}p" "$picked_file")"
+    else
+      local fallback_idx
+      fallback_idx=$(( (i - ${CFST_STABLE_SLOT_COUNT:-3} - 1) % ${CFST_STABLE_SLOT_COUNT:-3} + 1 ))
+      ip="$(sed -n "${fallback_idx}p" "$picked_file")"
+    fi
+    [ -n "$ip" ] && printf '%s\t%s\n' "$name" "$ip"
+    i=$((i + 1))
+  done
+  rm -f "$picked_file"
+}
+
+emergency_refresh_plan_rows() {
+  local desired_file current_file
+  desired_file="$APP_DIR/emergency-refresh.desired.tsv"
+  current_file="$APP_DIR/emergency-refresh.current.tsv"
+  emergency_refresh_desired_rows > "$desired_file"
+  guard_repair_current_rows > "$current_file"
+
+  awk -F '\t' '
+    FNR == NR {
+      desired[$1]=$2
+      order[++order_count]=$1
+      next
+    }
+    $1 != "" {current[$1]=$2}
+    END {
+      print "name\tcurrent_ip\tdesired_ip\taction"
+      for (i=1; i<=order_count; i++) {
+        name=order[i]
+        cur=(name in current) ? current[name] : "missing"
+        want=desired[name]
+        action="ok"
+        if (want == "") action="skip_missing_desired"
+        else if (cur == "missing" || cur == "") action="create"
+        else if (cur == "unavailable") action="blocked_unavailable"
+        else if (cur != want) action="update"
+        printf "%s\t%s\t%s\t%s\n", name, cur, want, action
+      }
+    }
+  ' "$desired_file" "$current_file"
+}
+
+emergency_refresh_update_count() {
+  [ -s "$EMERGENCY_REFRESH_REPORT_FILE" ] || {
+    echo 0
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {count++} END {print count+0}' "$EMERGENCY_REFRESH_REPORT_FILE"
+}
+
+emergency_refresh_passed_count() {
+  [ -s "$EMERGENCY_REFRESH_VALIDATE_FILE" ] || {
+    echo 0
+    return 0
+  }
+  awk -F '\t' \
+    -v min_speed="${CFST_EMERGENCY_REFRESH_MIN_SPEED:-6.5}" \
+    -v rounds="${CFST_EMERGENCY_REFRESH_ROUNDS:-2}" \
+    'NR > 1 && ($4 + 0) >= min_speed && ($6 + 0) >= rounds {count++} END {print count+0}' "$EMERGENCY_REFRESH_VALIDATE_FILE"
+}
+
+apply_emergency_refresh_report_updates() {
+  [ -s "$EMERGENCY_REFRESH_REPORT_FILE" ] || die "emergency-refresh report is missing: $EMERGENCY_REFRESH_REPORT_FILE"
+  check_cloudflare_auth
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $3}' "$EMERGENCY_REFRESH_REPORT_FILE" |
+    while IFS="$(printf '\t')" read -r name ip; do
+      [ -n "$name" ] && [ -n "$ip" ] || continue
+      upsert_single_dns_record "$name" "$ip"
+      sleep 1
+    done
+}
+
+emergency_refresh_impl() {
+  echo "=== emergency-refresh ==="
+  printf 'enabled=%s\n' "${CFST_EMERGENCY_REFRESH:-1}"
+  printf 'apply=%s\n' "${CFST_EMERGENCY_REFRESH_APPLY:-0}"
+  printf 'trigger_primary_max_min_speed=%s\n' "${CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED:-2}"
+  printf 'candidate_min_speed=%s\n' "${CFST_EMERGENCY_REFRESH_MIN_SPEED:-6.5}"
+  printf 'rounds=%s\n' "${CFST_EMERGENCY_REFRESH_ROUNDS:-2}"
+
+  if ! emergency_refresh_primary_degraded; then
+    echo "status=skipped_primary_not_degraded"
+    return 0
+  fi
+
+  emergency_refresh_validate_candidates
+  echo
+  echo "=== emergency-refresh-validation ==="
+  cat "$EMERGENCY_REFRESH_VALIDATE_FILE"
+  echo
+
+  local passed updates
+  passed="$(emergency_refresh_passed_count)"
+  printf 'passed_candidates=%s\n' "$passed"
+  printf 'min_passed_slots=%s\n' "${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}"
+  if [ "$passed" -lt "${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}" ]; then
+    echo "status=blocked_not_enough_fresh_candidates"
+    return 0
+  fi
+
+  emergency_refresh_plan_rows | tee "$EMERGENCY_REFRESH_REPORT_FILE"
+  updates="$(emergency_refresh_update_count)"
+  printf 'updates=%s\n' "$updates"
+  printf 'max_updates=%s\n' "${CFST_EMERGENCY_REFRESH_MAX_UPDATES:-5}"
+  if [ "${CFST_EMERGENCY_REFRESH_APPLY:-0}" != "1" ]; then
+    echo "status=dry_run"
+  elif [ "$updates" -eq 0 ]; then
+    echo "status=skipped_no_updates"
+  elif [ "$updates" -le "${CFST_EMERGENCY_REFRESH_MAX_UPDATES:-5}" ]; then
+    echo "status=applying"
+    apply_emergency_refresh_report_updates
+    echo "status=applied"
+  else
+    echo "status=blocked_too_many_updates"
+  fi
+}
+
+emergency_refresh_command() {
+  acquire_lock
+  validate_current_impl
+  echo
+  emergency_refresh_impl
+}
+
 identify_reverse_ip_regions() {
   [ "$CDN_IP_MODE" = "reverse" ] || return 0
   log "反代 IP：开始识别前 10 个优选 IP 的国家/地区"
@@ -2042,7 +2347,9 @@ run_once() {
   restart_proxy_if_needed
   show_best_ips
   identify_reverse_ip_regions
-  assert_primary_slot_guard
+  if [ "$PUSH_MODE" = "domain" ]; then
+    assert_primary_slot_guard
+  fi
   update_cloudflare
   send_notifications
   RUN_STATUS="success"
@@ -2273,10 +2580,22 @@ health_check_command() {
     printf 'CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=%s\n' "$CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS"
     printf 'EXPOSED_SLOT_GUARD_STATE_FILE=%s\n' "$EXPOSED_SLOT_GUARD_STATE_FILE"
     printf 'CFST_GUARD_REPAIR_APPLY=%s\n' "$CFST_GUARD_REPAIR_APPLY"
+    printf 'CFST_GUARD_REPAIR_STABLE_MIRROR=%s\n' "$CFST_GUARD_REPAIR_STABLE_MIRROR"
     printf 'CFST_OBSERVE_GUARD_REPAIR_REPORT=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_REPORT"
     printf 'CFST_OBSERVE_GUARD_REPAIR_APPLY=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_APPLY"
     printf 'CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES=%s\n' "$CFST_OBSERVE_GUARD_REPAIR_MAX_UPDATES"
+    printf 'CFST_EMERGENCY_REFRESH=%s\n' "$CFST_EMERGENCY_REFRESH"
+    printf 'CFST_EMERGENCY_REFRESH_APPLY=%s\n' "$CFST_EMERGENCY_REFRESH_APPLY"
+    printf 'CFST_OBSERVE_EMERGENCY_REFRESH_APPLY=%s\n' "$CFST_OBSERVE_EMERGENCY_REFRESH_APPLY"
+    printf 'CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED=%s\n' "$CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED"
+    printf 'CFST_EMERGENCY_REFRESH_MIN_SPEED=%s\n' "$CFST_EMERGENCY_REFRESH_MIN_SPEED"
+    printf 'CFST_EMERGENCY_REFRESH_CANDIDATES=%s\n' "$CFST_EMERGENCY_REFRESH_CANDIDATES"
+    printf 'CFST_EMERGENCY_REFRESH_ROUNDS=%s\n' "$CFST_EMERGENCY_REFRESH_ROUNDS"
+    printf 'CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS=%s\n' "$CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS"
+    printf 'CFST_EMERGENCY_REFRESH_MAX_UPDATES=%s\n' "$CFST_EMERGENCY_REFRESH_MAX_UPDATES"
     printf 'GUARD_REPAIR_REPORT_FILE=%s\n' "$GUARD_REPAIR_REPORT_FILE"
+    printf 'EMERGENCY_REFRESH_REPORT_FILE=%s\n' "$EMERGENCY_REFRESH_REPORT_FILE"
+    printf 'EMERGENCY_REFRESH_VALIDATE_FILE=%s\n' "$EMERGENCY_REFRESH_VALIDATE_FILE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"
@@ -2417,6 +2736,14 @@ observe_current_command() {
       fi
       echo
     fi
+  fi
+  if [ "${CFST_EMERGENCY_REFRESH:-1}" = "1" ]; then
+    local previous_emergency_apply
+    previous_emergency_apply="$CFST_EMERGENCY_REFRESH_APPLY"
+    CFST_EMERGENCY_REFRESH_APPLY="$CFST_OBSERVE_EMERGENCY_REFRESH_APPLY"
+    emergency_refresh_impl
+    CFST_EMERGENCY_REFRESH_APPLY="$previous_emergency_apply"
+    echo
   fi
   printf 'observation_history=%s\n' "$OBSERVATION_HISTORY_FILE"
 }
@@ -2644,6 +2971,7 @@ main() {
     external-observe) external_observe_command ;;
     observation-report) observation_report_command ;;
     guard-repair) guard_repair_command ;;
+    emergency-refresh) emergency_refresh_command ;;
     stability-update) stability_update_command ;;
     stability-verify) stability_verify_command ;;
     delete-records) delete_records_command ;;
