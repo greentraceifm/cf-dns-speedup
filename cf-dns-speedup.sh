@@ -14,6 +14,7 @@ EXPOSED_SLOT_GUARD_STATE_FILE="${EXPOSED_SLOT_GUARD_STATE_FILE:-$APP_DIR/exposed
 GUARD_REPAIR_REPORT_FILE="${GUARD_REPAIR_REPORT_FILE:-$APP_DIR/guard-repair.latest.tsv}"
 EMERGENCY_REFRESH_REPORT_FILE="${EMERGENCY_REFRESH_REPORT_FILE:-$APP_DIR/emergency-refresh.latest.tsv}"
 EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/emergency-refresh.validate.tsv}"
+EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR/emergency-rescue-scan.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -138,6 +139,11 @@ load_config() {
   CFST_EMERGENCY_REFRESH_ROUNDS="${CFST_EMERGENCY_REFRESH_ROUNDS:-$CFST_STABILITY_TEST_ROUNDS}"
   CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS="${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}"
   CFST_EMERGENCY_REFRESH_MAX_UPDATES="${CFST_EMERGENCY_REFRESH_MAX_UPDATES:-5}"
+  CFST_EMERGENCY_RESCUE_SCAN="${CFST_EMERGENCY_RESCUE_SCAN:-1}"
+  CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT="${CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT:-40}"
+  CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT="${CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT:-1500}"
+  CFST_EMERGENCY_RESCUE_STABILITY_COUNT="${CFST_EMERGENCY_RESCUE_STABILITY_COUNT:-8}"
+  CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS="${CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS:-2}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
@@ -2210,6 +2216,62 @@ emergency_refresh_passed_count() {
     'NR > 1 && ($4 + 0) >= min_speed && ($6 + 0) >= rounds {count++} END {print count+0}' "$EMERGENCY_REFRESH_VALIDATE_FILE"
 }
 
+emergency_rescue_scan() {
+  [ "${CFST_EMERGENCY_RESCUE_SCAN:-1}" = "1" ] || return 1
+  [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot emergency rescue scan"
+
+  local old_result_file old_stability_file old_verify_file old_raw_log
+  local old_download_count old_download_count_step old_download_count_max old_result_count
+  local old_total_timeout old_stability_count old_stability_rounds old_skip_pool
+  old_result_file="$RESULT_FILE"
+  old_stability_file="$STABILITY_RESULT_FILE"
+  old_verify_file="$STABILITY_VERIFY_RESULT_FILE"
+  old_raw_log="$CFST_RAW_LOG"
+  old_download_count="$CFST_DOWNLOAD_COUNT"
+  old_download_count_step="$CFST_DOWNLOAD_COUNT_STEP"
+  old_download_count_max="$CFST_DOWNLOAD_COUNT_MAX"
+  old_result_count="$CFST_RESULT_COUNT"
+  old_total_timeout="$CFST_TOTAL_TIMEOUT"
+  old_stability_count="$CFST_STABILITY_TEST_COUNT"
+  old_stability_rounds="$CFST_STABILITY_TEST_ROUNDS"
+  old_skip_pool="${CFST_SKIP_POOL_UPDATE:-0}"
+
+  RESULT_FILE="$APP_DIR/emergency-rescue-result.csv"
+  STABILITY_RESULT_FILE="$APP_DIR/emergency-rescue-stability.tsv"
+  STABILITY_VERIFY_RESULT_FILE="$APP_DIR/emergency-rescue-stability.verify.tsv"
+  CFST_RAW_LOG="$APP_DIR/emergency-rescue-cfst-output.log"
+  CFST_DOWNLOAD_COUNT="$CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT"
+  CFST_DOWNLOAD_COUNT_STEP=0
+  CFST_DOWNLOAD_COUNT_MAX="$CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT"
+  CFST_RESULT_COUNT="$CFST_EMERGENCY_RESCUE_STABILITY_COUNT"
+  CFST_TOTAL_TIMEOUT="$CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT"
+  CFST_STABILITY_TEST_COUNT="$CFST_EMERGENCY_RESCUE_STABILITY_COUNT"
+  CFST_STABILITY_TEST_ROUNDS="$CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS"
+  CFST_SKIP_POOL_UPDATE=1
+
+  rm -f "$RESULT_FILE" "$STABILITY_RESULT_FILE" "$EMERGENCY_RESCUE_SCAN_REPORT_FILE"
+  run_speedtest
+  if [ -s "$STABILITY_RESULT_FILE" ]; then
+    cp "$STABILITY_RESULT_FILE" "$EMERGENCY_RESCUE_SCAN_REPORT_FILE"
+    cp "$STABILITY_RESULT_FILE" "$EMERGENCY_REFRESH_VALIDATE_FILE"
+  fi
+
+  RESULT_FILE="$old_result_file"
+  STABILITY_RESULT_FILE="$old_stability_file"
+  STABILITY_VERIFY_RESULT_FILE="$old_verify_file"
+  CFST_RAW_LOG="$old_raw_log"
+  CFST_DOWNLOAD_COUNT="$old_download_count"
+  CFST_DOWNLOAD_COUNT_STEP="$old_download_count_step"
+  CFST_DOWNLOAD_COUNT_MAX="$old_download_count_max"
+  CFST_RESULT_COUNT="$old_result_count"
+  CFST_TOTAL_TIMEOUT="$old_total_timeout"
+  CFST_STABILITY_TEST_COUNT="$old_stability_count"
+  CFST_STABILITY_TEST_ROUNDS="$old_stability_rounds"
+  CFST_SKIP_POOL_UPDATE="$old_skip_pool"
+
+  [ -s "$EMERGENCY_RESCUE_SCAN_REPORT_FILE" ]
+}
+
 apply_emergency_refresh_report_updates() {
   [ -s "$EMERGENCY_REFRESH_REPORT_FILE" ] || die "emergency-refresh report is missing: $EMERGENCY_REFRESH_REPORT_FILE"
   check_cloudflare_auth
@@ -2228,6 +2290,7 @@ emergency_refresh_impl() {
   printf 'trigger_primary_max_min_speed=%s\n' "${CFST_EMERGENCY_REFRESH_PRIMARY_MAX_MIN_SPEED:-2}"
   printf 'candidate_min_speed=%s\n' "${CFST_EMERGENCY_REFRESH_MIN_SPEED:-6.5}"
   printf 'rounds=%s\n' "${CFST_EMERGENCY_REFRESH_ROUNDS:-2}"
+  printf 'rescue_scan=%s\n' "${CFST_EMERGENCY_RESCUE_SCAN:-1}"
 
   if ! emergency_refresh_primary_degraded; then
     echo "status=skipped_primary_not_degraded"
@@ -2245,8 +2308,23 @@ emergency_refresh_impl() {
   printf 'passed_candidates=%s\n' "$passed"
   printf 'min_passed_slots=%s\n' "${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}"
   if [ "$passed" -lt "${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}" ]; then
-    echo "status=blocked_not_enough_fresh_candidates"
-    return 0
+    if [ "${CFST_EMERGENCY_RESCUE_SCAN:-1}" = "1" ]; then
+      echo "status=trying_rescue_scan"
+      if emergency_rescue_scan; then
+        echo
+        echo "=== emergency-rescue-scan ==="
+        cat "$EMERGENCY_RESCUE_SCAN_REPORT_FILE"
+        passed="$(emergency_refresh_passed_count)"
+        printf 'rescue_passed_candidates=%s\n' "$passed"
+      else
+        echo "status=no_safe_replacement"
+        return 0
+      fi
+    fi
+    if [ "$passed" -lt "${CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS:-3}" ]; then
+      echo "status=no_safe_replacement"
+      return 0
+    fi
   fi
 
   emergency_refresh_plan_rows | tee "$EMERGENCY_REFRESH_REPORT_FILE"
@@ -2593,9 +2671,15 @@ health_check_command() {
     printf 'CFST_EMERGENCY_REFRESH_ROUNDS=%s\n' "$CFST_EMERGENCY_REFRESH_ROUNDS"
     printf 'CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS=%s\n' "$CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS"
     printf 'CFST_EMERGENCY_REFRESH_MAX_UPDATES=%s\n' "$CFST_EMERGENCY_REFRESH_MAX_UPDATES"
+    printf 'CFST_EMERGENCY_RESCUE_SCAN=%s\n' "$CFST_EMERGENCY_RESCUE_SCAN"
+    printf 'CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT=%s\n' "$CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT"
+    printf 'CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT=%s\n' "$CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT"
+    printf 'CFST_EMERGENCY_RESCUE_STABILITY_COUNT=%s\n' "$CFST_EMERGENCY_RESCUE_STABILITY_COUNT"
+    printf 'CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS=%s\n' "$CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS"
     printf 'GUARD_REPAIR_REPORT_FILE=%s\n' "$GUARD_REPAIR_REPORT_FILE"
     printf 'EMERGENCY_REFRESH_REPORT_FILE=%s\n' "$EMERGENCY_REFRESH_REPORT_FILE"
     printf 'EMERGENCY_REFRESH_VALIDATE_FILE=%s\n' "$EMERGENCY_REFRESH_VALIDATE_FILE"
+    printf 'EMERGENCY_RESCUE_SCAN_REPORT_FILE=%s\n' "$EMERGENCY_RESCUE_SCAN_REPORT_FILE"
     printf 'CFST_URL=%s\n' "$CFST_URL"
     printf 'PROXY_PLUGIN=%s\n' "$PROXY_PLUGIN"
     printf 'DRY_RUN=%s\n' "$DRY_RUN"

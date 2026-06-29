@@ -35,6 +35,7 @@ STABILITY_RESULT_FILE="$TMP_DIR/result.stability.tsv"
 EXPOSED_SLOT_GUARD_STATE_FILE="$TMP_DIR/exposed-slot-guard.tsv"
 EMERGENCY_REFRESH_REPORT_FILE="$TMP_DIR/emergency-refresh.latest.tsv"
 EMERGENCY_REFRESH_VALIDATE_FILE="$TMP_DIR/emergency-refresh.validate.tsv"
+EMERGENCY_RESCUE_SCAN_REPORT_FILE="$TMP_DIR/emergency-rescue-scan.latest.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
 
@@ -77,10 +78,20 @@ CFST_EMERGENCY_REFRESH_CANDIDATES=5
 CFST_EMERGENCY_REFRESH_ROUNDS=2
 CFST_EMERGENCY_REFRESH_MIN_PASSED_SLOTS=3
 CFST_EMERGENCY_REFRESH_MAX_UPDATES=5
+CFST_EMERGENCY_RESCUE_SCAN=1
+CFST_EMERGENCY_RESCUE_DOWNLOAD_COUNT=40
+CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT=1500
+CFST_EMERGENCY_RESCUE_STABILITY_COUNT=8
+CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS=2
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
+CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
+CFST_DOWNLOAD_COUNT=100
+CFST_DOWNLOAD_COUNT_STEP=0
+CFST_DOWNLOAD_COUNT_MAX=100
+CFST_TOTAL_TIMEOUT=3600
 CFST_CHAMPION_POOL=1
 CFST_CHAMPION_POOL_SIZE=10
 CFST_DEGRADE_MIN_SPEED=2
@@ -254,6 +265,37 @@ fi
 cp "$FIXTURES/dual-pool-stability-results.tsv" "$ORIGINAL_STABILITY_RESULT_FILE"
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "emergency refresh only promotes freshly validated candidates during full primary degradation"
+
+cat > "$VALIDATE_RESULT_FILE" <<'EOF'
+ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+104.17.10.1	0	0	0.30	0.40	2
+104.17.10.2	0	0	0.40	0.50	2
+104.17.10.3	0	0	0.50	0.60	2
+EOF
+cat > "$EMERGENCY_REFRESH_VALIDATE_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.26.30.1	0	18.00	0.10	0.20	2	champion
+EOF
+ORIGINAL_RESULT_FILE="$RESULT_FILE"
+ORIGINAL_STABILITY_FILE="$STABILITY_RESULT_FILE"
+run_speedtest() {
+  printf 'IP 地址,已发送,已接收,丢包率,平均延迟,下载速度 (MB/s)\n' > "$RESULT_FILE"
+  cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.26.30.1	0	20.00	9.00	9.20	2	new
+104.26.30.2	0	19.00	8.50	8.80	2	new
+172.67.30.3	0	18.00	8.20	8.30	2	new
+104.20.30.4	0	17.00	1.00	1.20	2	new
+EOF
+}
+emergency_rescue_scan || fail "emergency rescue scan should produce a report"
+[ "$RESULT_FILE" = "$ORIGINAL_RESULT_FILE" ] || fail "emergency rescue scan should restore RESULT_FILE"
+[ "$STABILITY_RESULT_FILE" = "$ORIGINAL_STABILITY_FILE" ] || fail "emergency rescue scan should restore STABILITY_RESULT_FILE"
+[ "$(emergency_refresh_passed_count)" = "3" ] || fail "emergency rescue scan should provide three passing candidates"
+emergency_refresh_plan_rows > "$TMP_DIR/emergency-refresh-rescue-plan.tsv"
+awk -F '\t' '$1 == "auto.example.test" && $3 == "104.26.30.1" && $4 == "update" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/emergency-refresh-rescue-plan.tsv" \
+  || fail "emergency rescue scan should feed emergency DNS plan"
+pass "emergency rescue scan finds fresh replacements without polluting production result files"
 
 GUARD_STATUS="$(print_primary_slot_guard | awk -F '\t' '$2 == "104.26.2.86" {print $6}')"
 [ "$GUARD_STATUS" = "degraded" ] || fail "primary-slot guard should report degraded IP, got ${GUARD_STATUS:-missing}"
