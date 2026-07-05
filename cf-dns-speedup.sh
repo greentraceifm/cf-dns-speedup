@@ -15,7 +15,10 @@ GUARD_REPAIR_REPORT_FILE="${GUARD_REPAIR_REPORT_FILE:-$APP_DIR/guard-repair.late
 EMERGENCY_REFRESH_REPORT_FILE="${EMERGENCY_REFRESH_REPORT_FILE:-$APP_DIR/emergency-refresh.latest.tsv}"
 EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/emergency-refresh.validate.tsv}"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR/emergency-rescue-scan.latest.tsv}"
+CANDIDATE_CULTIVATION_REPORT_FILE="${CANDIDATE_CULTIVATION_REPORT_FILE:-$APP_DIR/candidate-cultivation.latest.tsv}"
 PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
+PASSWALL_NODE_HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
+PASSWALL_STABLE_REPAIR_REPORT_FILE="${PASSWALL_STABLE_REPAIR_REPORT_FILE:-$APP_DIR/passwall-stable-repair.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -147,6 +150,10 @@ load_config() {
   CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS="${CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS:-2}"
   CFST_OBSERVATION_CANDIDATES="${CFST_OBSERVATION_CANDIDATES:-1}"
   CFST_OBSERVATION_CANDIDATE_MIN_SPEED="${CFST_OBSERVATION_CANDIDATE_MIN_SPEED:-$CFST_STABLE_SLOT_MIN_SPEED}"
+  CFST_CANDIDATE_CULTIVATION="${CFST_CANDIDATE_CULTIVATION:-1}"
+  CFST_CANDIDATE_CULTIVATION_LIMIT="${CFST_CANDIDATE_CULTIVATION_LIMIT:-3}"
+  CFST_CANDIDATE_CULTIVATION_MIN_SPEED="${CFST_CANDIDATE_CULTIVATION_MIN_SPEED:-${CFST_PREFER_MIN_SPEED:-10}}"
+  CFST_CANDIDATE_CULTIVATION_ROUNDS="${CFST_CANDIDATE_CULTIVATION_ROUNDS:-1}"
   CFST_DUAL_POOL_MODE="${CFST_DUAL_POOL_MODE:-1}"
   CFST_COMPETITIVE_SLOT_COUNT="${CFST_COMPETITIVE_SLOT_COUNT:-2}"
   CFST_OBSERVATION_RECENT_WINDOW="${CFST_OBSERVATION_RECENT_WINDOW:-2}"
@@ -177,6 +184,12 @@ load_config() {
   CFST_EXTERNAL_PROMOTION_ROUNDS="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}"
   CFST_EXTERNAL_PROMOTION_MIN_SPEED="${CFST_EXTERNAL_PROMOTION_MIN_SPEED:-0}"
   CFST_EXTERNAL_OBSERVATION_EVICT_FAILS="${CFST_EXTERNAL_OBSERVATION_EVICT_FAILS:-3}"
+  CFST_PASSWALL_STABLE_REPAIR="${CFST_PASSWALL_STABLE_REPAIR:-1}"
+  CFST_PASSWALL_STABLE_REPAIR_APPLY="${CFST_PASSWALL_STABLE_REPAIR_APPLY:-0}"
+  CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT="${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}"
+  CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
+  CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE="${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
+  CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES="${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
   CFST_ISP_PROFILE="${CFST_ISP_PROFILE:-}"
   normalize_retention_config
   normalize_slot_config
@@ -1092,6 +1105,129 @@ observation_candidate_rows() {
       }
     }
   ' "$OBSERVATION_HISTORY_FILE"
+}
+
+cultivation_candidate_rows() {
+  [ "${CFST_CANDIDATE_CULTIVATION:-1}" = "1" ] || return 0
+  local raw_file current_file
+  raw_file="$APP_DIR/candidate-cultivation.raw.tsv"
+  current_file="$APP_DIR/candidate-cultivation.current.tsv"
+  : > "$raw_file"
+  : > "$current_file"
+
+  [ -s "$VALIDATE_RESULT_FILE" ] && awk -F '\t' 'NR > 1 && $1 != "" {print $1}' "$VALIDATE_RESULT_FILE" > "$current_file"
+
+  if [ -s "$STABILITY_RESULT_FILE" ]; then
+    awk -F '\t' -v min_speed="${CFST_CANDIDATE_CULTIVATION_MIN_SPEED:-10}" '
+      NR == 1 {next}
+      $1 != "" && ($4 + 0) >= min_speed {
+        print $1 "\t" $2 "\t" $3 "\t" $7 "\t" ($4 + 0) "\t" ($5 + 0)
+      }
+    ' "$STABILITY_RESULT_FILE" >> "$raw_file"
+  fi
+
+  if [ -s "$CHAMPION_POOL_FILE" ]; then
+    awk -F '\t' -v min_speed="${CFST_CANDIDATE_CULTIVATION_MIN_SPEED:-10}" '
+      NR == 1 {next}
+      $1 != "" && $9 != "stable" && ($4 + 0) >= min_speed {
+        print $1 "\t0\t" ($2 + 0) "\tchampion_cultivation\t" ($4 + 0) "\t" ($3 + 0)
+      }
+    ' "$CHAMPION_POOL_FILE" >> "$raw_file"
+  fi
+
+  awk -F '\t' \
+    -v current_file="$current_file" \
+    -v limit="${CFST_CANDIDATE_CULTIVATION_LIMIT:-3}" '
+    BEGIN {
+      while ((getline row < current_file) > 0) {
+        gsub(/\r/, "", row)
+        if (row != "") current[row]=1
+      }
+      close(current_file)
+    }
+    $1 != "" && !($1 in current) {
+      ip=$1
+      score=$5+0
+      if (!(ip in seen)) {
+        order[++count]=ip
+        latency[ip]=$2
+        cfst_speed[ip]=$3
+        source[ip]=$4
+        rank_speed[ip]=score
+        avg_speed[ip]=$6+0
+        seen[ip]=1
+      } else {
+        if (source[ip] !~ "(^|,)" $4 "(,|$)") source[ip]=source[ip] "," $4
+        if (score > rank_speed[ip] || (score == rank_speed[ip] && ($6+0) > avg_speed[ip])) {
+          latency[ip]=$2
+          cfst_speed[ip]=$3
+          rank_speed[ip]=score
+          avg_speed[ip]=$6+0
+        }
+      }
+    }
+    END {
+      for (i=1; i<=count; i++) {
+        pick=i
+        for (j=i+1; j<=count; j++) {
+          if (rank_speed[order[j]] > rank_speed[order[pick]] || (rank_speed[order[j]] == rank_speed[order[pick]] && avg_speed[order[j]] > avg_speed[order[pick]])) pick=j
+        }
+        tmp=order[i]; order[i]=order[pick]; order[pick]=tmp
+      }
+      for (i=1; i<=count && printed<limit; i++) {
+        ip=order[i]
+        print ip "\t" latency[ip] "\t" cfst_speed[ip] "\t" source[ip]
+        printed++
+      }
+    }
+  ' "$raw_file"
+  rm -f "$raw_file" "$current_file"
+}
+
+cultivation_validate_candidates() {
+  [ "${CFST_CANDIDATE_CULTIVATION:-1}" = "1" ] || return 0
+  [ -n "$CFST_URL" ] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local host candidates raw_file
+  host="$(cfst_url_host)"
+  [ -n "$host" ] || return 0
+  candidates="$APP_DIR/candidate-cultivation.candidates.tsv"
+  raw_file="$APP_DIR/candidate-cultivation.raw"
+  cultivation_candidate_rows > "$candidates"
+  printf 'ip\tlatency_ms\tcfst_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\tsource\n' > "$CANDIDATE_CULTIVATION_REPORT_FILE"
+  [ -s "$candidates" ] || return 0
+
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed source; do
+    [ -n "$ip" ] || continue
+    local round ok speed_bps
+    : > "$raw_file"
+    round=1
+    ok=0
+    while [ "$round" -le "${CFST_CANDIDATE_CULTIVATION_ROUNDS:-1}" ]; do
+      speed_bps="$(download_speed_bps "$host" "$ip")"
+      if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
+        awk -v bps="$speed_bps" 'BEGIN {printf "%.2f\n", bps / 1048576}' >> "$raw_file"
+        ok=$((ok + 1))
+      else
+        printf '0.00\n' >> "$raw_file"
+      fi
+      round=$((round + 1))
+    done
+    awk -v ip="$ip" -v latency="$latency" -v cfst_speed="$cfst_speed" -v ok="$ok" -v source="$source" '
+      BEGIN {min = ""; sum = 0; count = 0}
+      {
+        speed = $1 + 0
+        if (min == "" || speed < min) min = speed
+        sum += speed
+        count++
+      }
+      END {
+        avg = count > 0 ? sum / count : 0
+        printf "%s\t%s\t%s\t%.2f\t%.2f\t%d\t%s\n", ip, latency, cfst_speed, min + 0, avg, ok, source
+      }
+    ' "$raw_file" >> "$CANDIDATE_CULTIVATION_REPORT_FILE"
+  done < "$candidates"
+  rm -f "$candidates" "$raw_file"
 }
 
 build_stability_candidates() {
@@ -2179,6 +2315,161 @@ apply_guard_repair_report_updates() {
     done
 }
 
+passwall_current_address() {
+  local section
+  section="$(passwall_current_tcp_node)"
+  [ -n "$section" ] || return 0
+  uci -q get "passwall.$section.address" 2>/dev/null || true
+}
+
+passwall_current_record_name() {
+  local address name
+  address="$(passwall_current_address)"
+  [ -n "$address" ] || return 0
+  for name in $CF_RECORD_NAMES; do
+    if [ "$name" = "$address" ]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  done
+  printf '%s\n' "$address"
+}
+
+passwall_stable_repair_degraded() {
+  [ "${CFST_PASSWALL_STABLE_REPAIR:-1}" = "1" ] || return 1
+  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || return 1
+  local section
+  section="$(passwall_current_tcp_node)"
+  awk -F '\t' \
+    -v section="$section" \
+    -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" \
+    -v need="${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}" '
+    NR > 1 && $2 != "" && (section == "" || $2 == section) {
+      speed[++n]=$9+0
+      status[n]=$11
+    }
+    END {
+      for (i=n; i>=1 && count<need; i--) {
+        if (status[i] == "degraded" || speed[i] < min_speed) count++
+        else break
+      }
+      exit (count >= need) ? 0 : 1
+    }
+  ' "$PASSWALL_NODE_HISTORY_FILE"
+}
+
+stable_repair_candidate_rows() {
+  [ -s "$CHAMPION_POOL_FILE" ] || return 0
+  awk -F '\t' -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" '
+    NR == 1 {next}
+    $1 != "" && $9 == "stable" && $18 == "1" && ($4 + 0) >= min_speed {
+      ip[++n]=$1
+      stable_score[n]=$10+0
+      recent[n]=$4+0
+      best[n]=$2+0
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        pick=i
+        for (j=i+1; j<=n; j++) {
+          if (stable_score[j] > stable_score[pick] || (stable_score[j] == stable_score[pick] && recent[j] > recent[pick]) || (stable_score[j] == stable_score[pick] && recent[j] == recent[pick] && best[j] > best[pick])) pick=j
+        }
+        tmp=ip[i]; ip[i]=ip[pick]; ip[pick]=tmp
+        tmp=stable_score[i]; stable_score[i]=stable_score[pick]; stable_score[pick]=tmp
+        tmp=recent[i]; recent[i]=recent[pick]; recent[pick]=tmp
+        tmp=best[i]; best[i]=best[pick]; best[pick]=tmp
+      }
+      for (i=1; i<=n; i++) print ip[i] "\t" stable_score[i] "\t" recent[i] "\t" best[i]
+    }
+  ' "$CHAMPION_POOL_FILE"
+}
+
+passwall_stable_repair_plan_rows() {
+  local target_name current_file current_ip candidate_file candidate stable_count
+  printf 'name\tcurrent_ip\tdesired_ip\taction\treason\n'
+  target_name="$(passwall_current_record_name)"
+  [ -n "$target_name" ] || {
+    printf 'unknown\tunknown\tunknown\tblocked_no_passwall_record\tcannot_map_current_passwall_node\n'
+    return 0
+  }
+
+  if ! passwall_stable_repair_degraded; then
+    printf '%s\tunknown\tunknown\tskip_not_degraded\tneed_%s_consecutive_degraded_observations\n' \
+      "$target_name" "${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}"
+    return 0
+  fi
+
+  current_file="$APP_DIR/passwall-stable-repair.current.tsv"
+  candidate_file="$APP_DIR/passwall-stable-repair.candidates.tsv"
+  guard_repair_current_rows > "$current_file"
+  current_ip="$(awk -F '\t' -v name="$target_name" '$1 == name {print $2; found=1} END{if(!found) print "missing"}' "$current_file")"
+  stable_repair_candidate_rows > "$candidate_file"
+  stable_count="$(wc -l < "$candidate_file" 2>/dev/null | tr -d ' ')"
+  [ -n "$stable_count" ] || stable_count=0
+  if [ "$stable_count" -lt "${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}" ]; then
+    printf '%s\t%s\t%s\tblocked_insufficient_stable_pool\tstable_candidates=%s min_required=%s\n' \
+      "$target_name" "$current_ip" "$current_ip" "$stable_count" "${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
+    rm -f "$current_file" "$candidate_file"
+    return 0
+  fi
+
+  candidate="$(awk -F '\t' -v current="$current_ip" '$1 != current {print $1; found=1; exit} END{if(!found) exit 1}' "$candidate_file" 2>/dev/null || true)"
+  [ -n "$candidate" ] || candidate="$(awk -F '\t' 'NR == 1 {print $1}' "$candidate_file")"
+  if [ -z "$candidate" ]; then
+    printf '%s\t%s\t%s\tblocked_no_stable_candidate\tstable_pool_empty\n' "$target_name" "$current_ip" "$current_ip"
+  elif [ "$candidate" = "$current_ip" ]; then
+    printf '%s\t%s\t%s\tok\tcurrent_already_best_stable\n' "$target_name" "$current_ip" "$candidate"
+  else
+    printf '%s\t%s\t%s\tupdate\tpasswall_degraded_use_stable_pool\n' "$target_name" "$current_ip" "$candidate"
+  fi
+  rm -f "$current_file" "$candidate_file"
+}
+
+passwall_stable_repair_update_count() {
+  [ -s "$PASSWALL_STABLE_REPAIR_REPORT_FILE" ] || {
+    echo 0
+    return 0
+  }
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {count++} END {print count+0}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
+}
+
+apply_passwall_stable_repair_report_updates() {
+  [ -s "$PASSWALL_STABLE_REPAIR_REPORT_FILE" ] || die "passwall stable repair report is missing: $PASSWALL_STABLE_REPAIR_REPORT_FILE"
+  check_cloudflare_auth
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $3}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" |
+    while IFS="$(printf '\t')" read -r name ip; do
+      [ -n "$name" ] && [ -n "$ip" ] || continue
+      upsert_single_dns_record "$name" "$ip"
+      sleep 1
+    done
+}
+
+passwall_stable_repair_command() {
+  acquire_lock
+  mkdir -p "$APP_DIR"
+  echo "=== passwall-stable-repair ==="
+  printf 'enabled=%s\n' "${CFST_PASSWALL_STABLE_REPAIR:-1}"
+  printf 'apply=%s\n' "${CFST_PASSWALL_STABLE_REPAIR_APPLY:-0}"
+  printf 'degraded_count_required=%s\n' "${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}"
+  printf 'min_stable_candidates=%s\n' "${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
+  passwall_stable_repair_plan_rows | tee "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
+  local updates
+  updates="$(passwall_stable_repair_update_count)"
+  printf 'updates=%s\n' "$updates"
+  printf 'max_updates=%s\n' "${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
+  if [ "${CFST_PASSWALL_STABLE_REPAIR_APPLY:-0}" != "1" ]; then
+    echo "status=dry_run"
+  elif [ "$updates" -eq 0 ]; then
+    echo "status=skipped_no_updates"
+  elif [ "$updates" -le "${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}" ]; then
+    echo "status=applying"
+    apply_passwall_stable_repair_report_updates
+    echo "status=applied"
+  else
+    echo "status=blocked_too_many_updates"
+  fi
+}
+
 emergency_refresh_primary_degraded() {
   [ "${CFST_EMERGENCY_REFRESH:-1}" = "1" ] || return 1
   [ -s "$VALIDATE_RESULT_FILE" ] || return 1
@@ -2922,6 +3213,27 @@ observe_current_command() {
   fi
   awk -F '\t' -v ts="$ts" 'NR > 1 && $1 != "" {print ts "\t" $0}' "$VALIDATE_RESULT_FILE" >> "$OBSERVATION_HISTORY_FILE"
 
+  if [ "${CFST_CANDIDATE_CULTIVATION:-1}" = "1" ]; then
+    cultivation_validate_candidates
+    if [ -s "$CANDIDATE_CULTIVATION_REPORT_FILE" ]; then
+      awk -F '\t' -v ts="$ts" 'NR > 1 && $1 != "" {print ts "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6}' "$CANDIDATE_CULTIVATION_REPORT_FILE" >> "$OBSERVATION_HISTORY_FILE"
+    fi
+    if command -v update_champion_pool >/dev/null 2>&1; then
+      update_champion_pool
+    fi
+  fi
+
+  echo
+  echo "=== candidate-cultivation ==="
+  printf 'enabled=%s\n' "${CFST_CANDIDATE_CULTIVATION:-1}"
+  printf 'limit=%s\n' "${CFST_CANDIDATE_CULTIVATION_LIMIT:-3}"
+  printf 'min_speed=%s\n' "${CFST_CANDIDATE_CULTIVATION_MIN_SPEED:-10}"
+  if [ -s "$CANDIDATE_CULTIVATION_REPORT_FILE" ]; then
+    cat "$CANDIDATE_CULTIVATION_REPORT_FILE"
+  else
+    echo "status=no_candidates"
+  fi
+
   echo
   echo "=== dns ==="
   print_dns_health
@@ -3188,6 +3500,7 @@ main() {
     emergency-refresh) emergency_refresh_command ;;
     passwall-node-check) passwall_node_check_command ;;
     passwall-node-benchmark) passwall_node_benchmark_command ;;
+    passwall-stable-repair) passwall_stable_repair_command ;;
     stability-update) stability_update_command ;;
     stability-verify) stability_verify_command ;;
     delete-records) delete_records_command ;;

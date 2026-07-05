@@ -36,6 +36,9 @@ EXPOSED_SLOT_GUARD_STATE_FILE="$TMP_DIR/exposed-slot-guard.tsv"
 EMERGENCY_REFRESH_REPORT_FILE="$TMP_DIR/emergency-refresh.latest.tsv"
 EMERGENCY_REFRESH_VALIDATE_FILE="$TMP_DIR/emergency-refresh.validate.tsv"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="$TMP_DIR/emergency-rescue-scan.latest.tsv"
+CANDIDATE_CULTIVATION_REPORT_FILE="$TMP_DIR/candidate-cultivation.latest.tsv"
+PASSWALL_NODE_HISTORY_FILE="$TMP_DIR/passwall-node-observation-history.tsv"
+PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
 
@@ -86,6 +89,10 @@ CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS=2
 CFST_OBSERVATION_RECENT_WINDOW=2
 CFST_OBSERVATION_STALE_LOW_COUNT=2
 CFST_OBSERVATION_STABLE_MAX_LOW_COUNT=0
+CFST_CANDIDATE_CULTIVATION=1
+CFST_CANDIDATE_CULTIVATION_LIMIT=2
+CFST_CANDIDATE_CULTIVATION_MIN_SPEED=10
+CFST_CANDIDATE_CULTIVATION_ROUNDS=1
 CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
 CFST_DOWNLOAD_COUNT=100
@@ -331,6 +338,67 @@ fi
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 pass "primary-slot guard blocks missing primary slots"
 
+VALIDATE_RESULT_FILE="$TMP_DIR/validate-current.cultivation.tsv"
+cat > "$VALIDATE_RESULT_FILE" <<'EOF'
+ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+104.17.10.1	0	0	8.00	8.50	2
+EOF
+STABILITY_RESULT_FILE="$TMP_DIR/cultivation-stability.tsv"
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.10.1	0	14.00	14.00	14.00	2	current_dns
+104.26.40.1	0	16.00	16.00	16.00	2	new
+172.67.40.2	0	15.00	15.00	15.00	2	new
+104.20.40.3	0	9.00	9.00	9.00	2	new
+EOF
+download_speed_bps() {
+  case "$2" in
+    104.26.40.1) echo 15728640 ;;
+    172.67.40.2) echo 14680064 ;;
+    *) echo 0 ;;
+  esac
+}
+CFST_URL="https://example.test/20mb.bin"
+CFST_PORT=443
+cultivation_validate_candidates
+awk -F '\t' '$1 == "104.26.40.1" && $4 == "15.00" && $6 == "1" {found=1} END {exit found ? 0 : 1}' "$CANDIDATE_CULTIVATION_REPORT_FILE" \
+  || fail "candidate cultivation should validate top challenger"
+awk -F '\t' '$1 == "104.17.10.1" {found=1} END {exit found ? 1 : 0}' "$CANDIDATE_CULTIVATION_REPORT_FILE" \
+  || fail "candidate cultivation should skip already validated current DNS IP"
+pass "candidate cultivation validates high-throughput challengers without duplicating current DNS"
+
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
+2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded
+2026-07-05 15:05:00	sectionA	auto3	auto3.example.test	443	5242880	2.8	1800000	1.72	200	degraded
+EOF
+cat > "$CHAMPION_POOL_FILE" <<'EOF'
+ip	best_min_speed	best_avg_speed	recent_min_speed	fail_count	first_seen	last_seen	source	health_status	stable_score	recent_low_count	pool_type	lifecycle_state	lifecycle_reason	observation_count	consecutive_passes	consecutive_lows	promotion_ready
+104.17.10.1	9.00	9.20	8.80	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	30.00	0	stable	stable	ok	10	5	0	1
+104.17.10.2	9.80	9.90	9.70	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	35.00	0	stable	stable	ok	10	5	0	1
+104.17.10.3	9.50	9.60	9.40	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	34.00	0	stable	stable	ok	10	5	0	1
+104.26.40.1	16.00	16.00	16.00	0	2026-07-05 00:00:00	2026-07-05 00:00:00	new	challenger	-8.00	0	competitive	challenger	no_observation	0	0	0	0
+EOF
+CF_RECORD_NAMES="auto.example.test auto1.example.test auto2.example.test auto3.example.test auto4.example.test"
+CFST_GUARD_REPAIR_CURRENT_FILE="$TMP_DIR/passwall-stable-current.tsv"
+cat > "$CFST_GUARD_REPAIR_CURRENT_FILE" <<'EOF'
+name	ip
+auto.example.test	104.17.10.1
+auto1.example.test	104.17.10.2
+auto2.example.test	104.17.10.3
+auto3.example.test	104.17.10.1
+auto4.example.test	104.17.10.2
+EOF
+passwall_current_tcp_node() { echo sectionA; }
+passwall_current_address() { echo auto3.example.test; }
+CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE=3
+CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT=2
+passwall_stable_repair_plan_rows > "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
+awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.1" && $3 == "104.17.10.2" && $4 == "update" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" \
+  || fail "passwall stable repair should plan one-slot stable DNS replacement after consecutive degradation"
+pass "passwall stable repair plans bounded replacement from stable pool"
+
+STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 cp "$FIXTURES/lifecycle-champion-pool.tsv" "$CHAMPION_POOL_FILE"
 update_champion_pool >/dev/null
 

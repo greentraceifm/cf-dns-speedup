@@ -52,3 +52,12 @@ fi
 status="$(awk -F= '/^status=/ {print $2; found=1} END{if(!found) print "unknown"}' /tmp/passwall-node-observe.out)"
 awk -F '\t' -v now="$(date '+%F %T')" -v status="$status" 'NR == 2 {print now "\t" $0 "\t" status}' "$REPORT_FILE" >> "$HISTORY_FILE"
 log "passwall node observe completed: status=$status"
+
+if [ "${CFST_PASSWALL_STABLE_REPAIR:-1}" = "1" ]; then
+  /usr/bin/env bash ./cf-dns-speedup.sh passwall-stable-repair >/tmp/passwall-stable-repair.out 2>/tmp/passwall-stable-repair.err || {
+    log "passwall-stable-repair failed"
+    cat /tmp/passwall-stable-repair.err >> "$LOG_FILE" 2>/dev/null || true
+    exit 0
+  }
+  awk 'NF {print "stable-repair: " $0}' /tmp/passwall-stable-repair.out >> "$LOG_FILE" 2>/dev/null || true
+fi
