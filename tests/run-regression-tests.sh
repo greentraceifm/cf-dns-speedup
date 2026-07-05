@@ -347,4 +347,54 @@ grep -q 'guard-repair-dry-run' "$SCRIPT" || fail "observe-current guard-repair d
 grep -q 'if \[ "$PUSH_MODE" = "domain" \]; then' "$SCRIPT" || fail "primary guard should only gate DNS update mode"
 pass "champion lifecycle fields are generated consistently"
 
+PASSWALL_NODE_REPORT_FILE="$TMP_DIR/passwall-node-benchmark.tsv"
+PASSWALL_BACKUP_DIR="$TMP_DIR/backups"
+PASSWALL_CONFIG_FILE="$TMP_DIR/passwall.config"
+CFST_PASSWALL_NODE_SECTIONS="slowNode fastNode"
+CFST_PASSWALL_NODE_APPLY=1
+CFST_PASSWALL_NODE_RESTART_WAIT=0
+current_passwall_node="slowNode"
+current_acl_node="slowNode"
+printf 'config passwall\n' > "$PASSWALL_CONFIG_FILE"
+passwall_current_tcp_node() { echo "$current_passwall_node"; }
+passwall_current_acl_node() { echo "$current_acl_node"; }
+uci() {
+  case "$1 $2" in
+    "-q get")
+      case "$3" in
+        passwall.@global[0].tcp_node) echo "$current_passwall_node" ;;
+        passwall.@acl_rule[1].tcp_node) echo "$current_acl_node" ;;
+        passwall.slowNode.remarks) echo slow ;;
+        passwall.fastNode.remarks) echo fast ;;
+        passwall.slowNode.address) echo auto.example.test ;;
+        passwall.fastNode.address) echo auto3.example.test ;;
+        passwall.slowNode.port|passwall.fastNode.port) echo 443 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    "set passwall.@global[0].tcp_node=slowNode") current_passwall_node="slowNode" ;;
+    "set passwall.@global[0].tcp_node=fastNode") current_passwall_node="fastNode" ;;
+    "set passwall.@acl_rule[1].tcp_node=slowNode") current_acl_node="slowNode" ;;
+    "set passwall.@acl_rule[1].tcp_node=fastNode") current_acl_node="fastNode" ;;
+    "commit passwall") ;;
+    *) return 1 ;;
+  esac
+}
+passwall_restart_for_node_benchmark() { :; }
+acquire_lock() { :; }
+release_lock() { :; }
+passwall_measure_current_node() {
+  case "$1" in
+    slowNode) printf '20971520\t5.000000\t4194304\t4.00\t200\n' ;;
+    fastNode) printf '20971520\t2.500000\t8388608\t8.00\t200\n' ;;
+    *) printf '0\t0\t0\t0.00\t000\n' ;;
+  esac
+}
+passwall_node_benchmark_command > "$TMP_DIR/passwall-node.out"
+[ "$current_passwall_node" = "fastNode" ] || fail "passwall node benchmark should select fastest node"
+grep -q '^selected=fastNode$' "$TMP_DIR/passwall-node.out" || fail "passwall node benchmark should report selected node"
+awk -F '\t' '$1 == "fastNode" && $8 == "8.00" && $9 == "200" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_REPORT_FILE" \
+  || fail "passwall node benchmark should write parseable throughput report"
+pass "passwall node benchmark selects the fastest end-to-end proxy node"
+
 echo "all regression tests passed"

@@ -15,6 +15,7 @@ GUARD_REPAIR_REPORT_FILE="${GUARD_REPAIR_REPORT_FILE:-$APP_DIR/guard-repair.late
 EMERGENCY_REFRESH_REPORT_FILE="${EMERGENCY_REFRESH_REPORT_FILE:-$APP_DIR/emergency-refresh.latest.tsv}"
 EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/emergency-refresh.validate.tsv}"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR/emergency-rescue-scan.latest.tsv}"
+PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -905,6 +906,135 @@ download_speed_bps() {
     --resolve "$host:$CFST_PORT:$ip" \
     -w '%{http_code} %{size_download} %{speed_download}' \
     "$CFST_URL" 2>/dev/null | awk '$1 == 200 && $2 > 0 {print $3 + 0}' || true
+}
+
+passwall_node_sections() {
+  printf '%s\n' "${CFST_PASSWALL_NODE_SECTIONS:-4gimRsru 0FUdoZon aInFoVtC OEotWIjI RcklmTES}"
+}
+
+passwall_current_tcp_node() {
+  uci -q get passwall.@global[0].tcp_node 2>/dev/null || true
+}
+
+passwall_current_acl_node() {
+  uci -q get passwall.@acl_rule[1].tcp_node 2>/dev/null || true
+}
+
+passwall_set_tcp_node() {
+  local section="$1"
+  local acl_node="${2:-}"
+  uci set passwall.@global[0].tcp_node="$section"
+  if [ -n "$acl_node" ]; then
+    uci set passwall.@acl_rule[1].tcp_node="$section"
+  fi
+  uci commit passwall
+}
+
+passwall_restart_for_node_benchmark() {
+  local wait_seconds="${CFST_PASSWALL_NODE_RESTART_WAIT:-15}"
+  timeout 45 /etc/init.d/passwall restart >/tmp/passwall-node-benchmark.restart 2>&1 || true
+  sleep "$wait_seconds"
+}
+
+passwall_measure_current_node() {
+  local section="$1"
+  local body meta metric http total bytes speed mbps url
+  url="${CFST_PASSWALL_NODE_TEST_URL:-https://speed.cloudflare.com/__down?bytes=20971520}"
+  body="/tmp/passwall-node-${section}.$$.body"
+  meta="/tmp/passwall-node-${section}.$$.meta"
+  rm -f "$body" "$meta"
+  curl -s -L --socks5-hostname "${CFST_PASSWALL_SOCKS_HOST:-127.0.0.1:1070}" -k \
+    -w '%{stderr}METRIC:%{http_code}:%{time_total}' \
+    --connect-timeout "${CFST_PASSWALL_NODE_CONNECT_TIMEOUT:-12}" \
+    --max-time "${CFST_PASSWALL_NODE_TIMEOUT:-70}" \
+    "$url" >"$body" 2>"$meta" || true
+  metric="$(grep -ao 'METRIC:[0-9][0-9][0-9]:[0-9.]*' "$meta" 2>/dev/null | tail -n 1 || true)"
+  http="$(printf '%s' "$metric" | cut -d: -f2)"
+  total="$(printf '%s' "$metric" | cut -d: -f3)"
+  bytes="$(wc -c <"$body" 2>/dev/null || echo 0)"
+  [ -n "$http" ] || http=000
+  [ -n "$total" ] || total=0
+  speed="$(awk -v b="$bytes" -v t="$total" 'BEGIN{if(t>0){printf "%d", b/t}else{printf "0"}}')"
+  mbps="$(awk -v s="$speed" 'BEGIN{printf "%.2f", s/1048576}')"
+  rm -f "$body" "$meta"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$bytes" "$total" "$speed" "$mbps" "$http"
+}
+
+passwall_node_report_row() {
+  local section="$1"
+  local metrics="$2"
+  local remarks address port
+  remarks="$(uci -q get "passwall.$section.remarks" 2>/dev/null || echo unknown)"
+  address="$(uci -q get "passwall.$section.address" 2>/dev/null || echo unknown)"
+  port="$(uci -q get "passwall.$section.port" 2>/dev/null || echo unknown)"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$section" "$remarks" "$address" "$port" "$metrics"
+}
+
+passwall_node_check_command() {
+  local section metrics status speed_mbps
+  mkdir -p "$APP_DIR"
+  section="$(passwall_current_tcp_node)"
+  [ -n "$section" ] || die "passwall current tcp_node is empty"
+  printf 'section\tremarks\taddress\tport\tbytes\ttotal_s\tspeed_bps\tspeed_MBps\thttp\n' | tee "$PASSWALL_NODE_REPORT_FILE"
+  metrics="$(passwall_measure_current_node "$section")"
+  passwall_node_report_row "$section" "$metrics" | tee -a "$PASSWALL_NODE_REPORT_FILE"
+  speed_mbps="$(printf '%s\n' "$metrics" | awk -F '\t' '{print $4+0}')"
+  status="$(awk -v speed="$speed_mbps" -v min="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" 'BEGIN{print speed >= min ? "ok" : "degraded"}')"
+  echo "status=$status"
+  echo "report=$PASSWALL_NODE_REPORT_FILE"
+}
+
+passwall_node_benchmark_command() {
+  local apply="${CFST_PASSWALL_NODE_APPLY:-0}"
+  local orig_tcp orig_acl section metrics speed http best_section best_speed selected_speed backup backup_dir passwall_config
+  backup_dir="${PASSWALL_BACKUP_DIR:-/root/openwrt-backup}"
+  passwall_config="${PASSWALL_CONFIG_FILE:-/etc/config/passwall}"
+  mkdir -p "$APP_DIR" "$backup_dir"
+  acquire_lock
+  orig_tcp="$(passwall_current_tcp_node)"
+  orig_acl="$(passwall_current_acl_node)"
+  [ -n "$orig_tcp" ] || die "passwall current tcp_node is empty"
+  backup="$backup_dir/passwall.backup-$(date +%Y%m%d-%H%M%S)-node-benchmark"
+  cp -p "$passwall_config" "$backup"
+  best_section="$orig_tcp"
+  best_speed=0
+  printf 'section\tremarks\taddress\tport\tbytes\ttotal_s\tspeed_bps\tspeed_MBps\thttp\n' | tee "$PASSWALL_NODE_REPORT_FILE"
+  if [ "$apply" != "1" ]; then
+    metrics="$(passwall_measure_current_node "$orig_tcp")"
+    passwall_node_report_row "$orig_tcp" "$metrics" | tee -a "$PASSWALL_NODE_REPORT_FILE"
+    echo "status=readonly_current_only"
+    echo "set CFST_PASSWALL_NODE_APPLY=1 to benchmark and switch candidate nodes"
+    echo "backup=$backup"
+    echo "report=$PASSWALL_NODE_REPORT_FILE"
+    return 0
+  fi
+
+  for section in $(passwall_node_sections); do
+    passwall_set_tcp_node "$section" "$orig_acl"
+    passwall_restart_for_node_benchmark
+    metrics="$(passwall_measure_current_node "$section")"
+    passwall_node_report_row "$section" "$metrics" | tee -a "$PASSWALL_NODE_REPORT_FILE"
+    speed="$(printf '%s\n' "$metrics" | awk -F '\t' '{print int($3+0)}')"
+    http="$(printf '%s\n' "$metrics" | awk -F '\t' '{print $5}')"
+    if [ "$http" = "200" ] && [ "$speed" -gt "$best_speed" ]; then
+      best_speed="$speed"
+      best_section="$section"
+    fi
+  done
+
+  passwall_set_tcp_node "$best_section" "$orig_acl"
+  passwall_restart_for_node_benchmark
+  selected_speed="$(awk -F '\t' -v s="$best_section" '$1 == s {print $8; found=1} END{if(!found) print "0.00"}' "$PASSWALL_NODE_REPORT_FILE")"
+  echo "selected=$best_section"
+  echo "selected_speed_MBps=$selected_speed"
+  echo "best_speed_bps=$best_speed"
+  echo "backup=$backup"
+  echo "report=$PASSWALL_NODE_REPORT_FILE"
+  if awk -v speed="$selected_speed" -v min="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" 'BEGIN{exit !(speed < min)}'; then
+    echo "status=selected_but_below_target"
+  else
+    echo "status=selected_ok"
+  fi
 }
 
 current_dns_candidate_rows() {
@@ -3056,6 +3186,8 @@ main() {
     observation-report) observation_report_command ;;
     guard-repair) guard_repair_command ;;
     emergency-refresh) emergency_refresh_command ;;
+    passwall-node-check) passwall_node_check_command ;;
+    passwall-node-benchmark) passwall_node_benchmark_command ;;
     stability-update) stability_update_command ;;
     stability-verify) stability_verify_command ;;
     delete-records) delete_records_command ;;
