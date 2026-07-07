@@ -38,6 +38,7 @@ EMERGENCY_REFRESH_VALIDATE_FILE="$TMP_DIR/emergency-refresh.validate.tsv"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="$TMP_DIR/emergency-rescue-scan.latest.tsv"
 CANDIDATE_CULTIVATION_REPORT_FILE="$TMP_DIR/candidate-cultivation.latest.tsv"
 PASSWALL_NODE_HISTORY_FILE="$TMP_DIR/passwall-node-observation-history.tsv"
+PASSWALL_NODE_TOPOLOGY_FILE="$TMP_DIR/passwall-node-topology.tsv"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
@@ -416,6 +417,7 @@ grep -q 'if \[ "$PUSH_MODE" = "domain" \]; then' "$SCRIPT" || fail "primary guar
 pass "champion lifecycle fields are generated consistently"
 
 PASSWALL_NODE_REPORT_FILE="$TMP_DIR/passwall-node-benchmark.tsv"
+PASSWALL_NODE_TOPOLOGY_FILE="$TMP_DIR/passwall-node-topology.tsv"
 PASSWALL_BACKUP_DIR="$TMP_DIR/backups"
 PASSWALL_CONFIG_FILE="$TMP_DIR/passwall.config"
 CFST_PASSWALL_NODE_SECTIONS="slowNode fastNode"
@@ -430,8 +432,10 @@ uci() {
   case "$1 $2" in
     "-q get")
       case "$3" in
-        passwall.@global[0].tcp_node) echo "$current_passwall_node" ;;
-        passwall.@acl_rule[1].tcp_node) echo "$current_acl_node" ;;
+        passwall.@global\[0\].tcp_node) echo "$current_passwall_node" ;;
+        passwall.@acl_rule\[1\].tcp_node) echo "$current_acl_node" ;;
+        passwall.@acl_rule\[1\].enabled) echo 1 ;;
+        passwall.@acl_rule\[1\].sources) echo 192.168.1.110 ;;
         passwall.slowNode.remarks) echo slow ;;
         passwall.fastNode.remarks) echo fast ;;
         passwall.slowNode.address) echo auto.example.test ;;
@@ -440,14 +444,24 @@ uci() {
         *) return 1 ;;
       esac
       ;;
-    "set passwall.@global[0].tcp_node=slowNode") current_passwall_node="slowNode" ;;
-    "set passwall.@global[0].tcp_node=fastNode") current_passwall_node="fastNode" ;;
-    "set passwall.@acl_rule[1].tcp_node=slowNode") current_acl_node="slowNode" ;;
-    "set passwall.@acl_rule[1].tcp_node=fastNode") current_acl_node="fastNode" ;;
-    "commit passwall") ;;
+    set\ passwall.@global\[0\].tcp_node=slowNode) current_passwall_node="slowNode" ;;
+    set\ passwall.@global\[0\].tcp_node=fastNode) current_passwall_node="fastNode" ;;
+    set\ passwall.@acl_rule\[1\].tcp_node=slowNode) current_acl_node="slowNode" ;;
+    set\ passwall.@acl_rule\[1\].tcp_node=fastNode) current_acl_node="fastNode" ;;
+    commit\ passwall) ;;
     *) return 1 ;;
   esac
 }
+current_passwall_node="slowNode"
+current_acl_node="fastNode"
+passwall_node_topology_command > "$TMP_DIR/passwall-node-topology.out"
+awk -F '\t' '$1 == "global" && $2 == "slowNode" && $7 == "scoped_override" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_TOPOLOGY_FILE" \
+  || fail "passwall node topology should treat source-bound ACL mismatch as scoped override"
+awk -F '\t' '$1 == "acl1" && $2 == "fastNode" && $6 == "192.168.1.110" && $7 == "scoped_override" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_TOPOLOGY_FILE" \
+  || fail "passwall node topology should report ACL source binding"
+pass "passwall node topology distinguishes scoped ACL override from global drift"
+current_passwall_node="slowNode"
+current_acl_node="slowNode"
 passwall_restart_for_node_benchmark() { :; }
 acquire_lock() { :; }
 release_lock() { :; }
@@ -460,6 +474,7 @@ passwall_measure_current_node() {
 }
 passwall_node_benchmark_command > "$TMP_DIR/passwall-node.out"
 [ "$current_passwall_node" = "fastNode" ] || fail "passwall node benchmark should select fastest node"
+[ "$current_acl_node" = "slowNode" ] || fail "passwall node benchmark should preserve source-bound ACL by default"
 grep -q '^selected=fastNode$' "$TMP_DIR/passwall-node.out" || fail "passwall node benchmark should report selected node"
 awk -F '\t' '$1 == "fastNode" && $8 == "8.00" && $9 == "200" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_REPORT_FILE" \
   || fail "passwall node benchmark should write parseable throughput report"

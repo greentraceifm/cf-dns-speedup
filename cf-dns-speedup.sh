@@ -18,6 +18,7 @@ EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR
 CANDIDATE_CULTIVATION_REPORT_FILE="${CANDIDATE_CULTIVATION_REPORT_FILE:-$APP_DIR/candidate-cultivation.latest.tsv}"
 PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 PASSWALL_NODE_HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
+PASSWALL_NODE_TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="${PASSWALL_STABLE_REPAIR_REPORT_FILE:-$APP_DIR/passwall-stable-repair.latest.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
@@ -933,12 +934,93 @@ passwall_current_acl_node() {
   uci -q get passwall.@acl_rule[1].tcp_node 2>/dev/null || true
 }
 
+passwall_node_field() {
+  local section="$1"
+  local field="$2"
+  [ -n "$section" ] || return 0
+  uci -q get "passwall.$section.$field" 2>/dev/null || true
+}
+
+passwall_acl_rule_field() {
+  local index="$1"
+  local field="$2"
+  uci -q get "passwall.@acl_rule[$index].$field" 2>/dev/null || true
+}
+
+passwall_acl_rule_sources() {
+  local index="$1"
+  local sources
+  sources="$(passwall_acl_rule_field "$index" sources)"
+  [ -n "$sources" ] || sources="$(passwall_acl_rule_field "$index" src_ip)"
+  [ -n "$sources" ] || sources="$(passwall_acl_rule_field "$index" src_mac)"
+  printf '%s\n' "$sources"
+}
+
+passwall_topology_status() {
+  local global_section acl_section acl_enabled acl_sources
+  global_section="$(passwall_current_tcp_node)"
+  acl_section="$(passwall_current_acl_node)"
+  acl_enabled="$(passwall_acl_rule_field 1 enabled)"
+  acl_sources="$(passwall_acl_rule_sources 1)"
+
+  if [ -z "$global_section" ]; then
+    echo "missing_global"
+  elif [ -z "$acl_section" ]; then
+    echo "missing_acl1"
+  elif [ "$acl_section" = "$global_section" ]; then
+    echo "aligned"
+  elif [ "$acl_enabled" != "1" ]; then
+    echo "disabled_override"
+  elif [ -n "$acl_sources" ]; then
+    echo "scoped_override"
+  else
+    echo "global_acl_mismatch"
+  fi
+}
+
+passwall_print_node_topology() {
+  if ! command -v uci >/dev/null 2>&1; then
+    printf 'role\tsection\tremarks\taddress\tenabled\tsources\tstatus\n'
+    printf 'global\tunknown\tunknown\tunknown\tunknown\tunknown\tuci_unavailable\n'
+    return 0
+  fi
+
+  local global_section acl_section status
+  global_section="$(passwall_current_tcp_node)"
+  acl_section="$(passwall_current_acl_node)"
+  status="$(passwall_topology_status)"
+
+  printf 'role\tsection\tremarks\taddress\tenabled\tsources\tstatus\n'
+  printf 'global\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${global_section:-unknown}" \
+    "$(passwall_node_field "$global_section" remarks)" \
+    "$(passwall_node_field "$global_section" address)" \
+    "1" \
+    "all" \
+    "$status"
+  printf 'acl1\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${acl_section:-unknown}" \
+    "$(passwall_node_field "$acl_section" remarks)" \
+    "$(passwall_node_field "$acl_section" address)" \
+    "$(passwall_acl_rule_field 1 enabled)" \
+    "$(passwall_acl_rule_sources 1)" \
+    "$status"
+}
+
+passwall_node_topology_command() {
+  mkdir -p "$APP_DIR"
+  passwall_print_node_topology | tee "$PASSWALL_NODE_TOPOLOGY_FILE"
+  echo "report=$PASSWALL_NODE_TOPOLOGY_FILE"
+}
+
 passwall_set_tcp_node() {
   local section="$1"
   local acl_node="${2:-}"
   uci set passwall.@global[0].tcp_node="$section"
-  if [ -n "$acl_node" ]; then
+  if [ "${CFST_PASSWALL_NODE_SYNC_ACL1:-0}" = "1" ]; then
     uci set passwall.@acl_rule[1].tcp_node="$section"
+  elif [ -n "$acl_node" ]; then
+    uci set passwall.@acl_rule[1].tcp_node="$acl_node"
   fi
   uci commit passwall
 }
@@ -984,7 +1066,7 @@ passwall_node_report_row() {
 }
 
 passwall_node_check_command() {
-  local section metrics status speed_mbps
+  local section metrics status speed_mbps topology_status
   mkdir -p "$APP_DIR"
   section="$(passwall_current_tcp_node)"
   [ -n "$section" ] || die "passwall current tcp_node is empty"
@@ -993,8 +1075,12 @@ passwall_node_check_command() {
   passwall_node_report_row "$section" "$metrics" | tee -a "$PASSWALL_NODE_REPORT_FILE"
   speed_mbps="$(printf '%s\n' "$metrics" | awk -F '\t' '{print $4+0}')"
   status="$(awk -v speed="$speed_mbps" -v min="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" 'BEGIN{print speed >= min ? "ok" : "degraded"}')"
+  passwall_print_node_topology > "$PASSWALL_NODE_TOPOLOGY_FILE"
+  topology_status="$(awk -F '\t' '$1 == "global" {print $7; found=1} END{if(!found) print "unknown"}' "$PASSWALL_NODE_TOPOLOGY_FILE")"
   echo "status=$status"
   echo "report=$PASSWALL_NODE_REPORT_FILE"
+  echo "topology_status=$topology_status"
+  echo "topology_report=$PASSWALL_NODE_TOPOLOGY_FILE"
 }
 
 passwall_node_benchmark_command() {
@@ -3141,6 +3227,9 @@ health_check_command() {
     echo
     echo "=== services ==="
     print_service_health
+    echo
+    echo "=== passwall-node-topology ==="
+    passwall_print_node_topology
   } | tee "$HEALTH_REPORT_FILE"
 }
 
@@ -3499,6 +3588,7 @@ main() {
     guard-repair) guard_repair_command ;;
     emergency-refresh) emergency_refresh_command ;;
     passwall-node-check) passwall_node_check_command ;;
+    passwall-node-topology) passwall_node_topology_command ;;
     passwall-node-benchmark) passwall_node_benchmark_command ;;
     passwall-stable-repair) passwall_stable_repair_command ;;
     stability-update) stability_update_command ;;
