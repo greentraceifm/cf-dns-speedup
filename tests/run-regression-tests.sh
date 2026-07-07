@@ -399,6 +399,60 @@ awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.1" && $3 == "104.17.
   || fail "passwall stable repair should plan one-slot stable DNS replacement after consecutive degradation"
 pass "passwall stable repair plans bounded replacement from stable pool"
 
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
+2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded
+2026-07-05 15:05:00	sectionA	auto3	auto3.example.test	443	5242880	0.7	10500000	10.00	200	ok
+2026-07-05 21:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.2	1600000	1.53	200	degraded
+2026-07-06 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.1	1650000	1.57	200	degraded
+EOF
+CFST_PASSWALL_DEGRADED_WARN_COUNT=2
+passwall_node_degraded_count_result="$(passwall_node_degraded_count)"
+[ "$passwall_node_degraded_count_result" = "2" ] || fail "passwall node degraded count should track latest consecutive lows, got $passwall_node_degraded_count_result"
+print_passwall_node_degradation > "$TMP_DIR/passwall-node-degradation.tsv"
+awk -F '\t' 'NR == 2 && $1 == "sectionA" && $3 == "1.57" && $5 == "2" && $7 == "needs_maintenance" {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/passwall-node-degradation.tsv" \
+  || fail "passwall node degradation report should flag maintenance after repeated lows"
+pass "passwall node degradation reports consecutive low-throughput observations"
+
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
+2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded
+2026-07-05 15:05:00	sectionA	auto3	auto3.example.test	443	5242880	0.7	10500000	10.00	200	ok
+EOF
+passwall_stable_repair_plan_rows > "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
+awk -F '\t' '$4 == "skip_not_degraded" && $5 ~ /current_section=sectionA/ && $5 ~ /consecutive_degraded=0/ {found=1} END {exit found ? 0 : 1}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" \
+  || fail "passwall stable repair should explain skip_not_degraded with current section and degraded count"
+pass "passwall stable repair explains why it does not act"
+
+CFST_DNS_HEALTH_RETRIES=2
+CFST_DNS_HEALTH_RETRY_SLEEP=0
+dns_lookup_attempts_file="$TMP_DIR/dns-lookup-attempts"
+echo 0 > "$dns_lookup_attempts_file"
+nslookup() {
+  attempts="$(cat "$dns_lookup_attempts_file")"
+  attempts=$((attempts + 1))
+  echo "$attempts" > "$dns_lookup_attempts_file"
+  if [ "$1" = "auto.example.test" ] && [ "$attempts" -eq 1 ]; then
+    return 0
+  fi
+  cat <<'EOF'
+Server:		127.0.0.1
+Address:	127.0.0.1:53
+
+Non-authoritative answer:
+Name:	auto.example.test
+Address: 104.17.10.1
+EOF
+}
+router_dns_ip="$(router_dns_lookup_with_retries auto.example.test)"
+[ "$router_dns_ip" = "104.17.10.1" ] || fail "router DNS lookup should parse BusyBox nslookup answer after retry, got ${router_dns_ip:-empty}"
+[ "$(cat "$dns_lookup_attempts_file")" = "2" ] || fail "router DNS lookup should retry once after empty answer, attempts=$(cat "$dns_lookup_attempts_file")"
+CF_RECORD_NAMES="auto.example.test"
+print_dns_health > "$TMP_DIR/dns-health.tsv"
+grep -q '^auto.example.test router_dns 104.17.10.1$' "$TMP_DIR/dns-health.tsv" \
+  || fail "DNS health should report parsed router DNS IP"
+pass "DNS health retries and parses router nslookup output"
+
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 cp "$FIXTURES/lifecycle-champion-pool.tsv" "$CHAMPION_POOL_FILE"
 update_champion_pool >/dev/null

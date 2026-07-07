@@ -191,6 +191,10 @@ load_config() {
   CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
   CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE="${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
   CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES="${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
+  CFST_PASSWALL_DEGRADED_WARN_COUNT="${CFST_PASSWALL_DEGRADED_WARN_COUNT:-2}"
+  CFST_DNS_HEALTH_RETRIES="${CFST_DNS_HEALTH_RETRIES:-3}"
+  CFST_DNS_HEALTH_API_RETRIES="${CFST_DNS_HEALTH_API_RETRIES:-2}"
+  CFST_DNS_HEALTH_RETRY_SLEEP="${CFST_DNS_HEALTH_RETRY_SLEEP:-1}"
   CFST_ISP_PROFILE="${CFST_ISP_PROFILE:-}"
   normalize_retention_config
   normalize_slot_config
@@ -1011,6 +1015,58 @@ passwall_node_topology_command() {
   mkdir -p "$APP_DIR"
   passwall_print_node_topology | tee "$PASSWALL_NODE_TOPOLOGY_FILE"
   echo "report=$PASSWALL_NODE_TOPOLOGY_FILE"
+}
+
+passwall_node_degraded_count() {
+  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || {
+    echo 0
+    return 0
+  }
+  local section
+  section="$(passwall_current_tcp_node)"
+  [ -n "$section" ] || {
+    echo 0
+    return 0
+  }
+  awk -F '\t' \
+    -v section="$section" \
+    -v min_speed="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" '
+    NR > 1 && $2 == section {
+      if ($11 == "degraded" || ($9 + 0) < min_speed) count++
+      else count=0
+    }
+    END {print count + 0}
+  ' "$PASSWALL_NODE_HISTORY_FILE"
+}
+
+print_passwall_node_degradation() {
+  local section address count threshold latest_speed latest_status status
+  section="$(passwall_current_tcp_node)"
+  address="$(passwall_current_address)"
+  threshold="${CFST_PASSWALL_DEGRADED_WARN_COUNT:-2}"
+  count="$(passwall_node_degraded_count)"
+  latest_speed="n/a"
+  latest_status="no_history"
+  if [ -n "$section" ] && [ -s "$PASSWALL_NODE_HISTORY_FILE" ]; then
+    latest_speed="$(awk -F '\t' -v section="$section" 'NR > 1 && $2 == section {speed=$9; found=1} END{if(found) print speed; else print "n/a"}' "$PASSWALL_NODE_HISTORY_FILE")"
+    latest_status="$(awk -F '\t' -v section="$section" 'NR > 1 && $2 == section {status=$11; found=1} END{if(found) print status; else print "no_history"}' "$PASSWALL_NODE_HISTORY_FILE")"
+  fi
+  if [ -z "$section" ]; then
+    status="missing_current_node"
+  elif [ "$count" -ge "$threshold" ]; then
+    status="needs_maintenance"
+  elif [ "$count" -gt 0 ]; then
+    status="watch"
+  else
+    status="ok"
+  fi
+  printf 'section\taddress\tlatest_speed_MBps\tlatest_status\tconsecutive_degraded\tthreshold\tstatus\n'
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "${section:-unknown}" "${address:-unknown}" "$latest_speed" "$latest_status" "$count" "$threshold" "$status"
+}
+
+passwall_node_degradation_command() {
+  print_passwall_node_degradation
 }
 
 passwall_set_tcp_node() {
@@ -2423,24 +2479,26 @@ passwall_current_record_name() {
 
 passwall_stable_repair_degraded() {
   [ "${CFST_PASSWALL_STABLE_REPAIR:-1}" = "1" ] || return 1
-  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || return 1
+  local count
+  count="$(passwall_stable_repair_degraded_count)"
+  [ "$count" -ge "${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}" ]
+}
+
+passwall_stable_repair_degraded_count() {
+  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || {
+    echo 0
+    return 0
+  }
   local section
   section="$(passwall_current_tcp_node)"
   awk -F '\t' \
     -v section="$section" \
-    -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" \
-    -v need="${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}" '
+    -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" '
     NR > 1 && $2 != "" && (section == "" || $2 == section) {
-      speed[++n]=$9+0
-      status[n]=$11
+      if ($11 == "degraded" || ($9 + 0) < min_speed) count++
+      else count=0
     }
-    END {
-      for (i=n; i>=1 && count<need; i--) {
-        if (status[i] == "degraded" || speed[i] < min_speed) count++
-        else break
-      }
-      exit (count >= need) ? 0 : 1
-    }
+    END {print count + 0}
   ' "$PASSWALL_NODE_HISTORY_FILE"
 }
 
@@ -2480,8 +2538,11 @@ passwall_stable_repair_plan_rows() {
   }
 
   if ! passwall_stable_repair_degraded; then
-    printf '%s\tunknown\tunknown\tskip_not_degraded\tneed_%s_consecutive_degraded_observations\n' \
-      "$target_name" "${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}"
+    local degraded_count current_section
+    degraded_count="$(passwall_stable_repair_degraded_count)"
+    current_section="$(passwall_current_tcp_node)"
+    printf '%s\tnot_checked\tnot_checked\tskip_not_degraded\tcurrent_section=%s consecutive_degraded=%s need=%s\n' \
+      "$target_name" "${current_section:-unknown}" "$degraded_count" "${CFST_PASSWALL_STABLE_REPAIR_DEGRADED_COUNT:-2}"
     return 0
   fi
 
@@ -2954,26 +3015,70 @@ print_service_health() {
   /etc/init.d/firewall status 2>/dev/null || true
 }
 
+router_dns_lookup_once() {
+  local name="$1"
+  command -v nslookup >/dev/null 2>&1 || return 0
+  nslookup "$name" 127.0.0.1 2>/dev/null | awk '
+    /^Address[[:space:]]*[0-9]*:/ {
+      ip=$NF
+      if (ip !~ /^(127\.|::1)/ && ip !~ /:53$/) {print ip; exit}
+    }
+    /^Address:/ {
+      ip=$2
+      if (ip !~ /^(127\.|::1)/ && ip !~ /:53$/) {print ip; exit}
+    }
+  '
+}
+
+router_dns_lookup_with_retries() {
+  local name="$1"
+  local retries="${CFST_DNS_HEALTH_RETRIES:-3}"
+  local sleep_s="${CFST_DNS_HEALTH_RETRY_SLEEP:-1}"
+  local i ip
+  i=1
+  while [ "$i" -le "$retries" ]; do
+    ip="$(router_dns_lookup_once "$name")"
+    if [ -n "$ip" ]; then
+      printf '%s\n' "$ip"
+      return 0
+    fi
+    [ "$i" -lt "$retries" ] && sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 0
+}
+
+print_cloudflare_dns_health_line() {
+  local name="$1"
+  [ -n "${CF_API_TOKEN:-}" ] && [ -n "${CF_ZONE_ID:-}" ] && command -v jq >/dev/null 2>&1 || return 0
+  local api response i retries sleep_s
+  api="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name"
+  retries="${CFST_DNS_HEALTH_API_RETRIES:-2}"
+  sleep_s="${CFST_DNS_HEALTH_RETRY_SLEEP:-1}"
+  i=1
+  while [ "$i" -le "$retries" ]; do
+    response="$(cf_api GET "$api" 2>/dev/null || true)"
+    if echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
+      echo "$response" | jq -r --arg name "$name" '.result[0] | "\($name) cloudflare_api \(.content // "missing") ttl=\(.ttl // "n/a") proxied=\(.proxied | tostring)"'
+      return 0
+    fi
+    [ "$i" -lt "$retries" ] && sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  echo "$name cloudflare_api unavailable"
+}
+
 print_dns_health() {
   [ -n "$CF_RECORD_NAMES" ] || return 0
+  local name ip
   for name in $CF_RECORD_NAMES; do
-    if command -v nslookup >/dev/null 2>&1; then
-      nslookup "$name" 127.0.0.1 2>/dev/null | awk -v name="$name" '
-        /^Address [0-9]+: / && $3 !~ /^(127\.|::1)/ {ip=$3}
-        /^Address: / && $2 !~ /^(127\.|::1)/ {ip=$2}
-        END {if (ip != "") print name " router_dns " ip; else print name " router_dns unresolved"}
-      '
+    ip="$(router_dns_lookup_with_retries "$name")"
+    if [ -n "$ip" ]; then
+      echo "$name router_dns $ip"
+    else
+      echo "$name router_dns unresolved"
     fi
-    if [ -n "$CF_API_TOKEN" ] && [ -n "$CF_ZONE_ID" ] && command -v jq >/dev/null 2>&1; then
-      local api response
-      api="https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name"
-      response="$(cf_api GET "$api" 2>/dev/null || true)"
-      if echo "$response" | jq -e '.success == true' >/dev/null 2>&1; then
-        echo "$response" | jq -r --arg name "$name" '.result[0] | "\($name) cloudflare_api \(.content // "missing") ttl=\(.ttl // "n/a") proxied=\(.proxied | tostring)"'
-      else
-        echo "$name cloudflare_api unavailable"
-      fi
-    fi
+    print_cloudflare_dns_health_line "$name"
   done
 }
 
@@ -3230,6 +3335,9 @@ health_check_command() {
     echo
     echo "=== passwall-node-topology ==="
     passwall_print_node_topology
+    echo
+    echo "=== passwall-node-degradation ==="
+    print_passwall_node_degradation
   } | tee "$HEALTH_REPORT_FILE"
 }
 
@@ -3589,6 +3697,7 @@ main() {
     emergency-refresh) emergency_refresh_command ;;
     passwall-node-check) passwall_node_check_command ;;
     passwall-node-topology) passwall_node_topology_command ;;
+    passwall-node-degradation) passwall_node_degradation_command ;;
     passwall-node-benchmark) passwall_node_benchmark_command ;;
     passwall-stable-repair) passwall_stable_repair_command ;;
     stability-update) stability_update_command ;;
