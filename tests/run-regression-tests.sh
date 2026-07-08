@@ -37,9 +37,11 @@ EMERGENCY_REFRESH_REPORT_FILE="$TMP_DIR/emergency-refresh.latest.tsv"
 EMERGENCY_REFRESH_VALIDATE_FILE="$TMP_DIR/emergency-refresh.validate.tsv"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="$TMP_DIR/emergency-rescue-scan.latest.tsv"
 CANDIDATE_CULTIVATION_REPORT_FILE="$TMP_DIR/candidate-cultivation.latest.tsv"
+STABLE_POOL_REPLENISH_REPORT_FILE="$TMP_DIR/stable-pool-replenish.latest.tsv"
 PASSWALL_NODE_HISTORY_FILE="$TMP_DIR/passwall-node-observation-history.tsv"
 PASSWALL_NODE_TOPOLOGY_FILE="$TMP_DIR/passwall-node-topology.tsv"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
+PASSWALL_STABLE_REPAIR_STATE_FILE="$TMP_DIR/passwall-stable-repair.state.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
 
@@ -94,6 +96,10 @@ CFST_CANDIDATE_CULTIVATION=1
 CFST_CANDIDATE_CULTIVATION_LIMIT=2
 CFST_CANDIDATE_CULTIVATION_MIN_SPEED=10
 CFST_CANDIDATE_CULTIVATION_ROUNDS=1
+CFST_STABLE_POOL_REPLENISH=1
+CFST_STABLE_POOL_REPLENISH_LIMIT=3
+CFST_STABLE_POOL_REPLENISH_ROUNDS=2
+CFST_STABLE_POOL_REPLENISH_MIN_SPEED=6.5
 CFST_STABILITY_TEST_COUNT=12
 CFST_STABILITY_TEST_ROUNDS=2
 CFST_DOWNLOAD_COUNT=100
@@ -399,6 +405,16 @@ awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.1" && $3 == "104.17.
   || fail "passwall stable repair should plan one-slot stable DNS replacement after consecutive degradation"
 pass "passwall stable repair plans bounded replacement from stable pool"
 
+cat > "$PASSWALL_STABLE_REPAIR_STATE_FILE" <<EOF
+applied_at_epoch	applied_at	name	old_ip	new_ip
+$(date +%s)	2026-07-08 14:33:41	auto3.example.test	104.17.10.1	104.17.10.2
+EOF
+passwall_stable_repair_plan_rows > "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
+awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.2" && $3 == "104.17.10.2" && $4 == "skip_cooldown" && $5 ~ /old_ip=104.17.10.1/ {found=1} END {exit found ? 0 : 1}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" \
+  || fail "passwall stable repair should not flap during cooldown"
+rm -f "$PASSWALL_STABLE_REPAIR_STATE_FILE"
+pass "passwall stable repair cooldown prevents immediate flapping"
+
 cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
 observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
 2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded
@@ -453,6 +469,66 @@ grep -q '^auto.example.test router_dns 104.17.10.1$' "$TMP_DIR/dns-health.tsv" \
   || fail "DNS health should report parsed router DNS IP"
 pass "DNS health retries and parses router nslookup output"
 
+cp "$OBSERVATION_HISTORY_FILE" "$TMP_DIR/observation-history.before-champion-refresh.tsv"
+cat > "$OBSERVATION_HISTORY_FILE" <<'EOF'
+observed_at	ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+2026-06-07 10:30:00	104.17.10.6	0	0	8.20	8.50	1
+2026-06-07 20:30:00	104.17.10.6	0	0	8.40	8.60	1
+2026-07-07 08:30:00	104.17.10.5	0	0	7.20	7.50	1
+2026-07-07 10:30:00	104.17.10.5	0	0	7.40	7.70	1
+EOF
+cat > "$CHAMPION_POOL_FILE" <<'EOF'
+ip	best_min_speed	best_avg_speed	recent_min_speed	fail_count	first_seen	last_seen	source	health_status	stable_score	recent_low_count	pool_type	lifecycle_state	lifecycle_reason	observation_count	consecutive_passes	consecutive_lows	promotion_ready
+104.17.10.1	9.00	9.20	8.80	0	2026-07-01 00:00:00	2026-07-05 00:00:00	champion	stable	30.00	0	stable	stable	ok	10	5	0	1
+EOF
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.10.1	0	9.00	8.80	9.20	2	champion
+EOF
+update_champion_pool >/dev/null
+awk -F '\t' '$1 == "104.17.10.5" && $8 == "observation" && $9 == "stable" && $15 == "2" && $16 == "2" && $18 == "1" {found=1} END {exit found ? 0 : 1}' "$CHAMPION_POOL_FILE" \
+  || fail "champion refresh should admit stable observation-only IPs"
+awk -F '\t' '$1 == "104.17.10.6" {found=1} END {exit found ? 1 : 0}' "$CHAMPION_POOL_FILE" \
+  || fail "champion refresh should not admit old observation-only IPs"
+stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.tsv"
+awk -F '\t' '$1 == "104.17.10.5" && ($3 + 0) >= 7.40 {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/stable-repair-candidates.tsv" \
+  || fail "stable repair candidates should include promoted observation-only IP"
+awk -F '\t' '$1 == "104.17.10.6" {found=1} END {exit found ? 1 : 0}' "$TMP_DIR/stable-repair-candidates.tsv" \
+  || fail "stable repair candidates should exclude old observation-only IPs"
+grep -q 'champion-refresh)' "$SCRIPT" || fail "champion-refresh command is missing"
+mv "$TMP_DIR/observation-history.before-champion-refresh.tsv" "$OBSERVATION_HISTORY_FILE"
+pass "champion refresh admits observation-only stable IPs"
+
+cat > "$OBSERVATION_HISTORY_FILE" <<'EOF'
+observed_at	ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+2026-07-07 08:30:00	104.17.10.8	0	0	5.00	5.20	0
+EOF
+cat > "$CHAMPION_POOL_FILE" <<'EOF'
+ip	best_min_speed	best_avg_speed	recent_min_speed	fail_count	first_seen	last_seen	source	health_status	stable_score	recent_low_count	pool_type	lifecycle_state	lifecycle_reason	observation_count	consecutive_passes	consecutive_lows	promotion_ready
+104.17.10.8	8.00	8.20	5.00	2	2026-07-07 08:30:00	2026-07-07 08:30:00	observation	watch	12.00	1	stable	watch	needs_retest	1	0	1	0
+EOF
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+EOF
+download_speed_bps() {
+  case "$2" in
+    104.17.10.8) echo 7340032 ;;
+    *) echo 0 ;;
+  esac
+}
+CFST_STABLE_POOL_REPLENISH_LIMIT=1
+CFST_STABLE_POOL_REPLENISH_ROUNDS=2
+stable_pool_replenish_impl > "$TMP_DIR/stable-pool-replenish.out"
+awk -F '\t' '$2 == "104.17.10.8" && $7 == "pass" {pass_count++} END {exit pass_count == 2 ? 0 : 1}' "$STABLE_POOL_REPLENISH_REPORT_FILE" \
+  || fail "stable pool replenish should record two passing rounds"
+awk -F '\t' '$2 == "104.17.10.8" && ($5 + 0) >= 7.00 && ($7 + 0) == 1 {pass_count++} END {exit pass_count == 2 ? 0 : 1}' "$OBSERVATION_HISTORY_FILE" \
+  || fail "stable pool replenish should append each passing round to observation history"
+awk -F '\t' '$1 == "104.17.10.8" && $5 == "0" && $9 == "stable" && $16 >= 2 && $18 == "1" {found=1} END {exit found ? 0 : 1}' "$CHAMPION_POOL_FILE" \
+  || fail "stable pool replenish should promote retested watch candidate"
+grep -q 'stable-pool-replenish)' "$SCRIPT" || fail "stable-pool-replenish command is missing"
+pass "stable pool replenish promotes freshly retested watch candidates"
+
+cp "$FIXTURES/dual-pool-observation-history.tsv" "$OBSERVATION_HISTORY_FILE"
 STABILITY_RESULT_FILE="$ORIGINAL_STABILITY_RESULT_FILE"
 cp "$FIXTURES/lifecycle-champion-pool.tsv" "$CHAMPION_POOL_FILE"
 update_champion_pool >/dev/null

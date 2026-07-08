@@ -14,9 +14,10 @@ update_champion_pool() {
   now="$(date '+%F %T')"
   [ -s "$CHAMPION_POOL_FILE" ] && cp "$CHAMPION_POOL_FILE" "$old" || printf 'ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\tlifecycle_state\tlifecycle_reason\tobservation_count\tconsecutive_passes\tconsecutive_lows\tpromotion_ready\n' > "$old"
   [ -s "$CHAMPION_LIFECYCLE_AUDIT_FILE" ] || printf 'observed_at\tip\taction\thealth_status\tfail_count\tstable_score\tlifecycle_reason\n' > "$CHAMPION_LIFECYCLE_AUDIT_FILE"
-  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v audit_file="$CHAMPION_LIFECYCLE_AUDIT_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" '
+  awk -F '\t' -v now="$now" -v degrade="${CFST_DEGRADE_MIN_SPEED:-2}" -v champion_fail="${CFST_CHAMPION_FAIL_MIN_SPEED:-8}" -v rounds="${CFST_STABILITY_TEST_ROUNDS:-0}" -v evict="${CFST_FAIL_EVICT_COUNT:-3}" -v size="${CFST_CHAMPION_POOL_SIZE:-10}" -v obs_file="$OBSERVATION_HISTORY_FILE" -v audit_file="$CHAMPION_LIFECYCLE_AUDIT_FILE" -v min_speed="${CFST_STABLE_SLOT_MIN_SPEED:-8}" -v fallback_min_speed="${CFST_STABLE_SLOT_FALLBACK_MIN_SPEED:-6.5}" -v stale_low_count="${CFST_OBSERVATION_STALE_LOW_COUNT:-3}" -v stable_max_low="${CFST_OBSERVATION_STABLE_MAX_LOW_COUNT:-1}" -v recent_window="${CFST_OBSERVATION_RECENT_WINDOW:-2}" -v quorum_min_obs="${CFST_PRIMARY_QUORUM_MIN_OBSERVATIONS:-2}" -v quorum_recent_passes="${CFST_PRIMARY_QUORUM_RECENT_PASSES:-2}" -v prefer_regex="${CFST_STABLE_SLOT_PREFER_REGEX:-^104\\.17\\.}" -v avoid_regex="${CFST_STABLE_SLOT_AVOID_REGEX:-^(104\\.20\\.|104\\.26\\.|172\\.67\\.)}" -v require_latest_stable="${CFST_CHAMPION_REQUIRE_LATEST_OBSERVATION_FOR_STABLE:-1}" -v observation_only_latest="${CFST_CHAMPION_OBSERVATION_ONLY_LATEST_ONLY:-1}" '
     function classify(ip, recent_start, recent_lows, passes) {
       if (obs_count[ip] == 0) return "challenger"
+      if (require_latest_stable == "1" && obs_latest_at != "" && obs_last[ip] < obs_latest_at) return "watch"
       recent_start=obs_count[ip] - recent_window + 1
       if (recent_start < 1) recent_start=1
       recent_lows=0
@@ -77,6 +78,10 @@ update_champion_pool() {
         split(row, f, "\t")
         if (f[1] == "observed_at" || f[2] == "") continue
         ip=f[2]
+        obs_seen[ip]=1
+        if (obs_first[ip] == "") obs_first[ip]=f[1]
+        obs_last[ip]=f[1]
+        if (f[1] > obs_latest_at) obs_latest_at=f[1]
         obs_count[ip]++
         idx=obs_count[ip]
         obs_min[ip,idx]=f[5]+0
@@ -84,7 +89,11 @@ update_champion_pool() {
         obs_recent_min[ip]=f[5]+0
         obs_recent_ok[ip]=f[7]+0
         obs_sum_min[ip]+=f[5]+0
+        obs_sum_avg[ip]+=f[6]+0
         obs_avg_min[ip]=obs_sum_min[ip] / obs_count[ip]
+        obs_avg_speed[ip]=obs_sum_avg[ip] / obs_count[ip]
+        if (obs_best_min[ip] == "" || (f[5]+0) > obs_best_min[ip]) obs_best_min[ip]=f[5]+0
+        if (obs_best_avg[ip] == "" || (f[6]+0) > obs_best_avg[ip]) obs_best_avg[ip]=f[6]+0
         if ((f[5]+0) < fallback_min_speed || (f[7]+0) < 1) obs_low[ip]++
       }
       close(obs_file)
@@ -111,13 +120,36 @@ update_champion_pool() {
       else fail[ip]=0
     }
     END {
+      for (ip in obs_seen) {
+        if (!(ip in seen)) {
+          if (observation_only_latest == "1" && obs_latest_at != "" && obs_last[ip] < obs_latest_at) continue
+          order[++order_count]=ip
+          first[ip]=obs_first[ip] == "" ? now : obs_first[ip]
+          last[ip]=obs_last[ip] == "" ? now : obs_last[ip]
+          best_min[ip]=obs_best_min[ip]+0
+          best_avg[ip]=obs_best_avg[ip] == "" ? obs_avg_speed[ip]+0 : obs_best_avg[ip]+0
+          recent[ip]=obs_recent_min[ip]+0
+          fail[ip]=0
+          source[ip]="observation"
+          seen[ip]=1
+        }
+      }
       print "ip\tbest_min_speed\tbest_avg_speed\trecent_min_speed\tfail_count\tfirst_seen\tlast_seen\tsource\thealth_status\tstable_score\trecent_low_count\tpool_type\tlifecycle_state\tlifecycle_reason\tobservation_count\tconsecutive_passes\tconsecutive_lows\tpromotion_ready"
       for (i=1; i<=order_count; i++) {
         ip=order[i]
         if (printed_seen[ip]) continue
         printed_seen[ip]=1
-        if (fail[ip] >= evict) continue
+        if (obs_count[ip] > 0) {
+          if ((obs_best_min[ip]+0) > (best_min[ip]+0)) best_min[ip]=obs_best_min[ip]+0
+          if ((obs_best_avg[ip]+0) > (best_avg[ip]+0)) best_avg[ip]=obs_best_avg[ip]+0
+          recent[ip]=obs_recent_min[ip]+0
+          if (obs_last[ip] != "") last[ip]=obs_last[ip]
+          if (source[ip] == "") source[ip]="observation"
+          else if (source[ip] !~ "(^|,)observation(,|$)") source[ip]=source[ip] ",observation"
+        }
         if (health[ip] == "") health[ip]=classify(ip)
+        if (health[ip] == "stable") fail[ip]=0
+        if (fail[ip] >= evict) continue
         stable_score[ip]=compute_stable_score(ip)
         pool_type[ip]=(health[ip] == "stable" || health[ip] == "watch") ? "stable" : "competitive"
         consecutive_pass[ip]=consecutive_passes(ip)

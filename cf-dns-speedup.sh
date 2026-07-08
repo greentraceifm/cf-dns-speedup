@@ -16,10 +16,12 @@ EMERGENCY_REFRESH_REPORT_FILE="${EMERGENCY_REFRESH_REPORT_FILE:-$APP_DIR/emergen
 EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/emergency-refresh.validate.tsv}"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR/emergency-rescue-scan.latest.tsv}"
 CANDIDATE_CULTIVATION_REPORT_FILE="${CANDIDATE_CULTIVATION_REPORT_FILE:-$APP_DIR/candidate-cultivation.latest.tsv}"
+STABLE_POOL_REPLENISH_REPORT_FILE="${STABLE_POOL_REPLENISH_REPORT_FILE:-$APP_DIR/stable-pool-replenish.latest.tsv}"
 PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 PASSWALL_NODE_HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
 PASSWALL_NODE_TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="${PASSWALL_STABLE_REPAIR_REPORT_FILE:-$APP_DIR/passwall-stable-repair.latest.tsv}"
+PASSWALL_STABLE_REPAIR_STATE_FILE="${PASSWALL_STABLE_REPAIR_STATE_FILE:-$APP_DIR/passwall-stable-repair.state.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
 CURRENT_OBSERVATION_REPORT_FILE="${CURRENT_OBSERVATION_REPORT_FILE:-$APP_DIR/current-observation-report.latest.txt}"
 CHAMPION_POOL_FILE="${CHAMPION_POOL_FILE:-$APP_DIR/champion-pool.tsv}"
@@ -163,6 +165,12 @@ load_config() {
   CFST_COMPARE_CURRENT_DNS="${CFST_COMPARE_CURRENT_DNS:-1}"
   CFST_CHAMPION_POOL="${CFST_CHAMPION_POOL:-1}"
   CFST_CHAMPION_POOL_SIZE="${CFST_CHAMPION_POOL_SIZE:-10}"
+  CFST_CHAMPION_REQUIRE_LATEST_OBSERVATION_FOR_STABLE="${CFST_CHAMPION_REQUIRE_LATEST_OBSERVATION_FOR_STABLE:-0}"
+  CFST_CHAMPION_OBSERVATION_ONLY_LATEST_ONLY="${CFST_CHAMPION_OBSERVATION_ONLY_LATEST_ONLY:-1}"
+  CFST_STABLE_POOL_REPLENISH="${CFST_STABLE_POOL_REPLENISH:-1}"
+  CFST_STABLE_POOL_REPLENISH_LIMIT="${CFST_STABLE_POOL_REPLENISH_LIMIT:-3}"
+  CFST_STABLE_POOL_REPLENISH_ROUNDS="${CFST_STABLE_POOL_REPLENISH_ROUNDS:-2}"
+  CFST_STABLE_POOL_REPLENISH_MIN_SPEED="${CFST_STABLE_POOL_REPLENISH_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
   CFST_RETAIN_RATIO="${CFST_RETAIN_RATIO:-0.90}"
   CFST_REPLACE_IMPROVE_RATIO="${CFST_REPLACE_IMPROVE_RATIO:-1.25}"
   CFST_DEGRADE_MIN_SPEED="${CFST_DEGRADE_MIN_SPEED:-2}"
@@ -191,6 +199,7 @@ load_config() {
   CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED}"
   CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE="${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
   CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES="${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
+  CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS:-7200}"
   CFST_PASSWALL_DEGRADED_WARN_COUNT="${CFST_PASSWALL_DEGRADED_WARN_COUNT:-2}"
   CFST_DNS_HEALTH_RETRIES="${CFST_DNS_HEALTH_RETRIES:-3}"
   CFST_DNS_HEALTH_API_RETRIES="${CFST_DNS_HEALTH_API_RETRIES:-2}"
@@ -2502,6 +2511,29 @@ passwall_stable_repair_degraded_count() {
   ' "$PASSWALL_NODE_HISTORY_FILE"
 }
 
+passwall_stable_repair_cooldown_line() {
+  local target_name="$1"
+  [ -s "$PASSWALL_STABLE_REPAIR_STATE_FILE" ] || return 0
+  local now
+  now="$(date +%s 2>/dev/null || echo 0)"
+  awk -F '\t' \
+    -v target="$target_name" \
+    -v now="$now" \
+    -v cooldown="${CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS:-7200}" '
+    NR > 1 && $3 == target {
+      epoch=$1+0
+      old_ip=$4
+      new_ip=$5
+      found=1
+    }
+    END {
+      if (!found || epoch <= 0 || now <= 0) exit
+      age=now-epoch
+      if (age < cooldown) print old_ip "\t" new_ip "\t" (cooldown-age)
+    }
+  ' "$PASSWALL_STABLE_REPAIR_STATE_FILE"
+}
+
 stable_repair_candidate_rows() {
   [ -s "$CHAMPION_POOL_FILE" ] || return 0
   awk -F '\t' -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" '
@@ -2536,6 +2568,17 @@ passwall_stable_repair_plan_rows() {
     printf 'unknown\tunknown\tunknown\tblocked_no_passwall_record\tcannot_map_current_passwall_node\n'
     return 0
   }
+
+  local cooldown_line cooldown_old cooldown_new cooldown_remaining
+  cooldown_line="$(passwall_stable_repair_cooldown_line "$target_name")"
+  if [ -n "$cooldown_line" ]; then
+    IFS="$(printf '\t')" read -r cooldown_old cooldown_new cooldown_remaining <<EOF
+$cooldown_line
+EOF
+    printf '%s\t%s\t%s\tskip_cooldown\told_ip=%s new_ip=%s remaining_seconds=%s\n' \
+      "$target_name" "${cooldown_new:-unknown}" "${cooldown_new:-unknown}" "${cooldown_old:-unknown}" "${cooldown_new:-unknown}" "${cooldown_remaining:-unknown}"
+    return 0
+  fi
 
   if ! passwall_stable_repair_degraded; then
     local degraded_count current_section
@@ -2583,10 +2626,14 @@ passwall_stable_repair_update_count() {
 apply_passwall_stable_repair_report_updates() {
   [ -s "$PASSWALL_STABLE_REPAIR_REPORT_FILE" ] || die "passwall stable repair report is missing: $PASSWALL_STABLE_REPAIR_REPORT_FILE"
   check_cloudflare_auth
-  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $3}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" |
-    while IFS="$(printf '\t')" read -r name ip; do
+  awk -F '\t' 'NR > 1 && ($4 == "update" || $4 == "create") {print $1 "\t" $2 "\t" $3}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" |
+    while IFS="$(printf '\t')" read -r name old_ip ip; do
       [ -n "$name" ] && [ -n "$ip" ] || continue
       upsert_single_dns_record "$name" "$ip"
+      {
+        printf 'applied_at_epoch\tapplied_at\tname\told_ip\tnew_ip\n'
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s 2>/dev/null || echo 0)" "$(date '+%F %T')" "$name" "$old_ip" "$ip"
+      } > "$PASSWALL_STABLE_REPAIR_STATE_FILE"
       sleep 1
     done
 }
@@ -2646,9 +2693,10 @@ emergency_refresh_candidate_rows() {
 emergency_refresh_validate_candidates() {
   [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot emergency-refresh"
   command -v curl >/dev/null 2>&1 || die "curl is required"
-  local host candidates raw_file
+  local host candidates raw_file run_ts
   host="$(cfst_url_host)"
   [ -n "$host" ] || die "cannot parse host from CFST_URL"
+  run_ts="$(date '+%F %T')"
   candidates="$APP_DIR/emergency-refresh.candidates.tsv"
   raw_file="$APP_DIR/emergency-refresh.raw"
   emergency_refresh_candidate_rows > "$candidates"
@@ -3538,6 +3586,109 @@ current_observation_report_command() {
   } | tee "$CURRENT_OBSERVATION_REPORT_FILE"
 }
 
+champion_refresh_command() {
+  acquire_lock
+  mkdir -p "$APP_DIR"
+  command -v update_champion_pool >/dev/null 2>&1 || die "champion pool helper is unavailable"
+  update_champion_pool
+  champion_report_command
+}
+
+stable_pool_replenish_candidate_rows() {
+  [ "${CFST_STABLE_POOL_REPLENISH:-1}" = "1" ] || return 0
+  [ -s "$CHAMPION_POOL_FILE" ] || return 0
+  awk -F '\t' -v limit="${CFST_STABLE_POOL_REPLENISH_LIMIT:-3}" '
+    NR == 1 {next}
+    $1 != "" && $12 == "stable" && $9 == "watch" {
+      ip[++n]=$1
+      score[n]=$10+0
+      recent[n]=$4+0
+      best[n]=$2+0
+      source[n]=$8
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        pick=i
+        for (j=i+1; j<=n; j++) {
+          if (score[j] > score[pick] || (score[j] == score[pick] && recent[j] > recent[pick]) || (score[j] == score[pick] && recent[j] == recent[pick] && best[j] > best[pick])) pick=j
+        }
+        tmp=ip[i]; ip[i]=ip[pick]; ip[pick]=tmp
+        tmp=score[i]; score[i]=score[pick]; score[pick]=tmp
+        tmp=recent[i]; recent[i]=recent[pick]; recent[pick]=tmp
+        tmp=best[i]; best[i]=best[pick]; best[pick]=tmp
+        tmp=source[i]; source[i]=source[pick]; source[pick]=tmp
+      }
+      for (i=1; i<=n && i<=limit; i++) print ip[i] "\t" recent[i] "\t" best[i] "\t" source[i]
+    }
+  ' "$CHAMPION_POOL_FILE"
+}
+
+stable_pool_replenish_impl() {
+  [ "${CFST_STABLE_POOL_REPLENISH:-1}" = "1" ] || {
+    echo "status=disabled"
+    return 0
+  }
+  [ -n "$CFST_URL" ] || die "CFST_URL is empty; cannot replenish stable pool"
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+  local host candidates raw_file run_ts
+  host="$(cfst_url_host)"
+  [ -n "$host" ] || die "cannot parse host from CFST_URL"
+  run_ts="$(date '+%F %T')"
+  candidates="$APP_DIR/stable-pool-replenish.candidates.tsv"
+  raw_file="$APP_DIR/stable-pool-replenish.raw"
+  stable_pool_replenish_candidate_rows > "$candidates"
+  printf 'observed_at\tip\tprevious_min_speed_mbps\tbest_min_speed_mbps\tmeasured_speed_mbps\tok_rounds\tstatus\tsource\n' > "$STABLE_POOL_REPLENISH_REPORT_FILE"
+  if [ ! -s "$candidates" ]; then
+    echo "status=no_watch_candidates"
+    return 0
+  fi
+
+  if [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
+    printf 'observed_at\tip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$OBSERVATION_HISTORY_FILE"
+  fi
+
+  while IFS="$(printf '\t')" read -r ip previous_min best_min source; do
+    [ -n "$ip" ] || continue
+    local round speed_bps measured ts ok status
+    round=1
+    while [ "$round" -le "${CFST_STABLE_POOL_REPLENISH_ROUNDS:-2}" ]; do
+      ts="$run_ts"
+      speed_bps="$(download_speed_bps "$host" "$ip")"
+      ok=0
+      measured="0.00"
+      if [ -n "$speed_bps" ] && [ "$speed_bps" != "0" ]; then
+        measured="$(awk -v bps="$speed_bps" 'BEGIN {printf "%.2f", bps / 1048576}')"
+      fi
+      if awk -v speed="$measured" -v min_speed="${CFST_STABLE_POOL_REPLENISH_MIN_SPEED:-6.5}" 'BEGIN {exit (speed + 0) >= (min_speed + 0) ? 0 : 1}'; then
+        ok=1
+        status="pass"
+      else
+        status="low"
+      fi
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ts" "$ip" "$previous_min" "$best_min" "$measured" "$ok" "$status" "$source" >> "$STABLE_POOL_REPLENISH_REPORT_FILE"
+      printf '%s\t%s\t0\t0\t%s\t%s\t%s\n' "$ts" "$ip" "$measured" "$measured" "$ok" >> "$OBSERVATION_HISTORY_FILE"
+      round=$((round + 1))
+    done
+  done < "$candidates"
+  rm -f "$candidates" "$raw_file"
+
+  command -v update_champion_pool >/dev/null 2>&1 && update_champion_pool
+  cat "$STABLE_POOL_REPLENISH_REPORT_FILE"
+}
+
+stable_pool_replenish_command() {
+  acquire_lock
+  mkdir -p "$APP_DIR"
+  echo "=== stable-pool-replenish ==="
+  printf 'enabled=%s\n' "${CFST_STABLE_POOL_REPLENISH:-1}"
+  printf 'limit=%s\n' "${CFST_STABLE_POOL_REPLENISH_LIMIT:-3}"
+  printf 'rounds=%s\n' "${CFST_STABLE_POOL_REPLENISH_ROUNDS:-2}"
+  printf 'min_speed=%s\n' "${CFST_STABLE_POOL_REPLENISH_MIN_SPEED:-6.5}"
+  stable_pool_replenish_impl
+  echo
+  champion_report_command
+}
+
 external_candidate_check_command() {
   mkdir -p "$APP_DIR"
   : > "$EXTERNAL_CANDIDATE_CHECK_FILE"
@@ -3688,7 +3839,9 @@ main() {
     validate-current) validate_current_command ;;
     observe-current) observe_current_command ;;
     current-observation-report) current_observation_report_command ;;
+    champion-refresh) champion_refresh_command ;;
     champion-report) champion_report_command ;;
+    stable-pool-replenish) stable_pool_replenish_command ;;
     install-observe-cron) install_observe_cron_command ;;
     external-candidate-check) external_candidate_check_command ;;
     external-observe) external_observe_command ;;
