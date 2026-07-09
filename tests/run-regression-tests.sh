@@ -38,6 +38,7 @@ EMERGENCY_REFRESH_VALIDATE_FILE="$TMP_DIR/emergency-refresh.validate.tsv"
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="$TMP_DIR/emergency-rescue-scan.latest.tsv"
 CANDIDATE_CULTIVATION_REPORT_FILE="$TMP_DIR/candidate-cultivation.latest.tsv"
 STABLE_POOL_REPLENISH_REPORT_FILE="$TMP_DIR/stable-pool-replenish.latest.tsv"
+PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE="$TMP_DIR/passwall-candidate-validate.latest.tsv"
 PASSWALL_NODE_HISTORY_FILE="$TMP_DIR/passwall-node-observation-history.tsv"
 PASSWALL_NODE_TOPOLOGY_FILE="$TMP_DIR/passwall-node-topology.tsv"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
@@ -631,5 +632,101 @@ awk -F '\t' '$1 == "fastNode" && $8 == "8.00" && $9 == "200" {found=1} END {exit
 awk -F '\t' '$2 == "slowNode" && $9 == "4.00" && $11 == "degraded" && $12 == "104.17.10.1" {slow=1} $2 == "fastNode" && $9 == "8.00" && $11 == "ok" && $12 == "104.17.10.3" {fast=1} END {exit (slow && fast) ? 0 : 1}' "$PASSWALL_NODE_HISTORY_FILE" \
   || fail "passwall node benchmark should append resolved IP throughput history"
 pass "passwall node benchmark selects the fastest end-to-end proxy node"
+
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.20.1	120.00	11.00	11.00	11.20	2	new
+104.17.20.2	121.00	10.00	10.00	10.30	2	new
+EOF
+cat > "$VALIDATE_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
+EOF
+cat > "$CHAMPION_POOL_FILE" <<'EOF'
+ip	best_min_speed	best_avg_speed	recent_min_speed	fail_count	first_seen	last_seen	source	health_status	stable_score	recent_low_count	pool_type	lifecycle_state	lifecycle_reason	observation_count	consecutive_passes	consecutive_lows	promotion_ready
+EOF
+rm -f "$PASSWALL_NODE_HISTORY_FILE" "$OBSERVATION_HISTORY_FILE"
+CFST_CANDIDATE_CULTIVATION=1
+CFST_CANDIDATE_CULTIVATION_MIN_SPEED=8
+CFST_PASSWALL_CANDIDATE_VALIDATE=1
+CFST_PASSWALL_CANDIDATE_APPLY=0
+CFST_PASSWALL_CANDIDATE_LIMIT=2
+CFST_PASSWALL_CANDIDATE_TEST_NAME="auto4.example.test"
+CFST_PASSWALL_CANDIDATE_TEST_SECTION="testNode"
+passwall_candidate_validate_command > "$TMP_DIR/passwall-candidate-validate-dry.out"
+grep -q '^status=dry_run$' "$TMP_DIR/passwall-candidate-validate-dry.out" \
+  || fail "passwall candidate validation should default to dry-run"
+awk -F '\t' '$2 == "104.17.20.1" && $8 == "planned" && $9 == "dry_run" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
+  || fail "passwall candidate validation dry-run should report planned candidates"
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
+2026-07-09 09:00:00	testNode	test	auto4.example.test	443	20971520	5.0	4194304	4.00	200	degraded	104.17.20.1
+EOF
+CFST_PASSWALL_CANDIDATE_LIMIT=1
+CFST_PASSWALL_CANDIDATE_RAW_LIMIT=2
+passwall_candidate_validate_command > "$TMP_DIR/passwall-candidate-validate-blocked-top.out"
+awk -F '\t' '$2 == "104.17.20.1" {bad=1} $2 == "104.17.20.2" && $8 == "planned" {good=1} END {exit (!bad && good) ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
+  || fail "passwall candidate validation should backfill after filtering a low-throughput top candidate"
+
+current_passwall_node="origNode"
+current_acl_node="origAcl"
+current_test_ip="104.17.99.9"
+printf 'config passwall\n' > "$PASSWALL_CONFIG_FILE"
+check_cloudflare_auth() { :; }
+guard_repair_current_rows() { printf 'auto4.example.test\t%s\n' "$current_test_ip"; }
+upsert_single_dns_record() {
+  [ "$1" = "auto4.example.test" ] || fail "unexpected DNS test name: $1"
+  current_test_ip="$2"
+}
+passwall_current_tcp_node() { echo "$current_passwall_node"; }
+passwall_current_acl_node() { echo "$current_acl_node"; }
+passwall_set_tcp_node() {
+  current_passwall_node="$1"
+  current_acl_node="${2:-$current_acl_node}"
+}
+passwall_restart_for_node_benchmark() { :; }
+update_champion_pool() { :; }
+uci() {
+  case "$1 $2" in
+    "-q get")
+      case "$3" in
+        passwall.testNode.remarks) echo test ;;
+        passwall.testNode.address) echo auto4.example.test ;;
+        passwall.testNode.port) echo 443 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+}
+nslookup() {
+  [ "$1" = "auto4.example.test" ] || return 1
+  printf 'Name: %s\nAddress 1: %s\n' "$1" "$current_test_ip"
+}
+passwall_measure_current_node() {
+  case "$current_test_ip" in
+    104.17.20.1) printf '20971520\t2.500000\t8388608\t8.00\t200\n' ;;
+    104.17.20.2) printf '20971520\t5.000000\t4194304\t4.00\t200\n' ;;
+    *) printf '0\t0\t0\t0.00\t000\n' ;;
+  esac
+}
+rm -f "$PASSWALL_NODE_HISTORY_FILE" "$OBSERVATION_HISTORY_FILE"
+CFST_PASSWALL_CANDIDATE_APPLY=1
+CFST_PASSWALL_CANDIDATE_LIMIT=2
+CFST_PASSWALL_CANDIDATE_RAW_LIMIT=2
+CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS=0
+CFST_PASSWALL_CANDIDATE_RESTART_WAIT=0
+CFST_PASSWALL_CANDIDATE_MIN_MBPS=6.5
+passwall_candidate_validate_command > "$TMP_DIR/passwall-candidate-validate-apply.out"
+[ "$current_passwall_node" = "origNode" ] || fail "passwall candidate validation should restore original global node"
+[ "$current_acl_node" = "origAcl" ] || fail "passwall candidate validation should restore original ACL node"
+[ "$current_test_ip" = "104.17.99.9" ] || fail "passwall candidate validation should restore original test DNS IP"
+awk -F '\t' '$2 == "104.17.20.1" && $6 == "8.00" && $8 == "pass" {pass_ip=1} $2 == "104.17.20.2" && $6 == "4.00" && $8 == "low" {low_ip=1} END {exit (pass_ip && low_ip) ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
+  || fail "passwall candidate validation should report real PassWall pass/low results"
+awk -F '\t' '$2 == "testNode" && $4 == "auto4.example.test" && $12 == "104.17.20.1" {pass_seen=1} $2 == "testNode" && $12 == "104.17.20.2" {low_seen=1} END {exit (pass_seen && low_seen) ? 0 : 1}' "$PASSWALL_NODE_HISTORY_FILE" \
+  || fail "passwall candidate validation should append resolved-IP node history"
+awk -F '\t' '$2 == "104.17.20.1" && $5 == "8.00" && $7 == "1" {pass_obs=1} $2 == "104.17.20.2" {low_obs=1} END {exit (pass_obs && !low_obs) ? 0 : 1}' "$OBSERVATION_HISTORY_FILE" \
+  || fail "passwall candidate validation should only cultivate candidates that pass real PassWall throughput"
+grep -q 'passwall-candidate-validate)' "$SCRIPT" || fail "passwall-candidate-validate command is missing"
+pass "passwall candidate validation gates cultivation on real proxy throughput"
 
 echo "all regression tests passed"

@@ -17,6 +17,7 @@ EMERGENCY_REFRESH_VALIDATE_FILE="${EMERGENCY_REFRESH_VALIDATE_FILE:-$APP_DIR/eme
 EMERGENCY_RESCUE_SCAN_REPORT_FILE="${EMERGENCY_RESCUE_SCAN_REPORT_FILE:-$APP_DIR/emergency-rescue-scan.latest.tsv}"
 CANDIDATE_CULTIVATION_REPORT_FILE="${CANDIDATE_CULTIVATION_REPORT_FILE:-$APP_DIR/candidate-cultivation.latest.tsv}"
 STABLE_POOL_REPLENISH_REPORT_FILE="${STABLE_POOL_REPLENISH_REPORT_FILE:-$APP_DIR/stable-pool-replenish.latest.tsv}"
+PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE="${PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE:-$APP_DIR/passwall-candidate-validate.latest.tsv}"
 PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 PASSWALL_NODE_HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
 PASSWALL_NODE_TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
@@ -202,6 +203,15 @@ load_config() {
   CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS:-7200}"
   CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS:-86400}"
   CFST_PASSWALL_LOW_IP_RECENT_ROWS="${CFST_PASSWALL_LOW_IP_RECENT_ROWS:-24}"
+  CFST_PASSWALL_CANDIDATE_VALIDATE="${CFST_PASSWALL_CANDIDATE_VALIDATE:-1}"
+  CFST_PASSWALL_CANDIDATE_APPLY="${CFST_PASSWALL_CANDIDATE_APPLY:-0}"
+  CFST_PASSWALL_CANDIDATE_LIMIT="${CFST_PASSWALL_CANDIDATE_LIMIT:-3}"
+  CFST_PASSWALL_CANDIDATE_RAW_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
+  CFST_PASSWALL_CANDIDATE_MIN_MBPS="${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}"
+  CFST_PASSWALL_CANDIDATE_TEST_NAME="${CFST_PASSWALL_CANDIDATE_TEST_NAME:-auto4.greentraceifm.top}"
+  CFST_PASSWALL_CANDIDATE_TEST_SECTION="${CFST_PASSWALL_CANDIDATE_TEST_SECTION:-RcklmTES}"
+  CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS="${CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS:-75}"
+  CFST_PASSWALL_CANDIDATE_RESTART_WAIT="${CFST_PASSWALL_CANDIDATE_RESTART_WAIT:-10}"
   CFST_PASSWALL_DEGRADED_WARN_COUNT="${CFST_PASSWALL_DEGRADED_WARN_COUNT:-2}"
   CFST_DNS_HEALTH_RETRIES="${CFST_DNS_HEALTH_RETRIES:-3}"
   CFST_DNS_HEALTH_API_RETRIES="${CFST_DNS_HEALTH_API_RETRIES:-2}"
@@ -1247,6 +1257,144 @@ passwall_node_benchmark_command() {
   else
     echo "status=selected_ok"
   fi
+}
+
+passwall_candidate_validate_candidate_rows() {
+  [ "${CFST_PASSWALL_CANDIDATE_VALIDATE:-1}" = "1" ] || return 0
+  local candidates blocked
+  candidates="$APP_DIR/passwall-candidate-validate.raw-candidates.tmp"
+  blocked="$APP_DIR/passwall-candidate-validate.blocked.tsv"
+  local old_limit
+  old_limit="${CFST_CANDIDATE_CULTIVATION_LIMIT:-}"
+  CFST_CANDIDATE_CULTIVATION_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
+  cultivation_candidate_rows > "$candidates"
+  if [ -n "$old_limit" ]; then
+    CFST_CANDIDATE_CULTIVATION_LIMIT="$old_limit"
+  else
+    unset CFST_CANDIDATE_CULTIVATION_LIMIT
+  fi
+  passwall_recent_low_resolved_ips > "$blocked"
+  awk -F '\t' -v blocked_file="$blocked" -v limit="${CFST_PASSWALL_CANDIDATE_LIMIT:-3}" '
+    BEGIN {
+      while ((getline ip < blocked_file) > 0) {
+        gsub(/\r/, "", ip)
+        if (ip != "") blocked[ip]=1
+      }
+      close(blocked_file)
+    }
+    $1 != "" && !($1 in blocked) && printed < limit {
+      print
+      printed++
+    }
+  ' "$candidates"
+  rm -f "$candidates" "$blocked"
+}
+
+passwall_candidate_original_ip() {
+  local name="$1"
+  guard_repair_current_rows | awk -F '\t' -v name="$name" '$1 == name {print $2; found=1} END {if(!found) print ""}'
+}
+
+passwall_candidate_record_result() {
+  local ip="$1"
+  local latency="$2"
+  local cfst_speed="$3"
+  local source="$4"
+  local metrics="$5"
+  local action="$6"
+  local reason="$7"
+  local bytes total speed_bps speed_mbps http status
+  IFS="$(printf '\t')" read -r bytes total speed_bps speed_mbps http <<EOF
+$metrics
+EOF
+  status="$(awk -v speed="$speed_mbps" -v http="$http" -v min="${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}" 'BEGIN{print (http == "200" && speed >= min) ? "pass" : "low"}')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date '+%F %T')" "$ip" "$source" "$latency" "$cfst_speed" \
+    "${speed_mbps:-0.00}" "${http:-000}" "$status" "$action" "$reason" \
+    "${CFST_PASSWALL_CANDIDATE_TEST_NAME:-auto4.greentraceifm.top}" >> "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
+  if [ "$status" = "pass" ]; then
+    if [ ! -s "$OBSERVATION_HISTORY_FILE" ]; then
+      printf 'observed_at\tip\tprevious_latency_ms\tprevious_speed_mbps\tmin_speed_mbps\tavg_speed_mbps\tok_rounds\n' > "$OBSERVATION_HISTORY_FILE"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t1\n' "$(date '+%F %T')" "$ip" "${latency:-0}" "${cfst_speed:-0}" "$speed_mbps" "$speed_mbps" >> "$OBSERVATION_HISTORY_FILE"
+  fi
+}
+
+passwall_candidate_validate_command() {
+  acquire_lock
+  mkdir -p "$APP_DIR"
+  local apply test_name test_section candidates original_tcp original_acl original_ip backup backup_dir passwall_config
+  apply="${CFST_PASSWALL_CANDIDATE_APPLY:-0}"
+  test_name="${CFST_PASSWALL_CANDIDATE_TEST_NAME:-auto4.greentraceifm.top}"
+  test_section="${CFST_PASSWALL_CANDIDATE_TEST_SECTION:-RcklmTES}"
+  candidates="$APP_DIR/passwall-candidate-validate.candidates.tsv"
+
+  echo "=== passwall-candidate-validate ==="
+  printf 'enabled=%s\n' "${CFST_PASSWALL_CANDIDATE_VALIDATE:-1}"
+  printf 'apply=%s\n' "$apply"
+  printf 'limit=%s\n' "${CFST_PASSWALL_CANDIDATE_LIMIT:-3}"
+  printf 'min_mbps=%s\n' "${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}"
+  printf 'test_name=%s\n' "$test_name"
+  printf 'test_section=%s\n' "$test_section"
+
+  printf 'tested_at\tip\tsource\tlatency_ms\tcfst_speed_mbps\tpasswall_speed_MBps\thttp\tstatus\taction\treason\ttest_name\n' > "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
+  passwall_candidate_validate_candidate_rows > "$candidates"
+  if [ ! -s "$candidates" ]; then
+    echo "status=no_candidates"
+    cat "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
+    rm -f "$candidates"
+    return 0
+  fi
+
+  if [ "$apply" != "1" ]; then
+    awk -F '\t' -v ts="$(date '+%F %T')" -v test_name="$test_name" '
+      $1 != "" {
+        printf "%s\t%s\t%s\t%s\t%s\t0.00\t000\tplanned\tdry_run\tset_CFST_PASSWALL_CANDIDATE_APPLY_1\t%s\n", ts, $1, $4, $2, $3, test_name
+      }
+    ' "$candidates" >> "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
+    echo "status=dry_run"
+    cat "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
+    rm -f "$candidates"
+    return 0
+  fi
+
+  check_cloudflare_auth
+  original_tcp="$(passwall_current_tcp_node)"
+  original_acl="$(passwall_current_acl_node)"
+  original_ip="$(passwall_candidate_original_ip "$test_name")"
+  [ -n "$original_tcp" ] || die "passwall current tcp_node is empty"
+  [ -n "$original_ip" ] && [ "$original_ip" != "missing" ] && [ "$original_ip" != "unavailable" ] || die "cannot resolve original DNS IP for $test_name"
+
+  backup_dir="${PASSWALL_BACKUP_DIR:-/root/openwrt-backup}"
+  passwall_config="${PASSWALL_CONFIG_FILE:-/etc/config/passwall}"
+  mkdir -p "$backup_dir"
+  backup="$backup_dir/passwall.backup-$(date +%Y%m%d-%H%M%S)-candidate-validate"
+  cp -p "$passwall_config" "$backup"
+  printf 'backup=%s\n' "$backup"
+  printf 'original_tcp=%s\n' "$original_tcp"
+  printf 'original_ip=%s\n' "$original_ip"
+
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed source; do
+    [ -n "$ip" ] || continue
+    local metrics previous_wait
+    upsert_single_dns_record "$test_name" "$ip"
+    previous_wait="${CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS:-75}"
+    [ "$previous_wait" -gt 0 ] 2>/dev/null && sleep "$previous_wait"
+    passwall_set_tcp_node "$test_section" "$original_acl"
+    CFST_PASSWALL_NODE_RESTART_WAIT="${CFST_PASSWALL_CANDIDATE_RESTART_WAIT:-10}" passwall_restart_for_node_benchmark
+    metrics="$(passwall_measure_current_node "$test_section")"
+    passwall_node_report_row "$test_section" "$metrics" > "$PASSWALL_NODE_REPORT_FILE"
+    passwall_append_node_history_row "$test_section" "$metrics"
+    passwall_candidate_record_result "$ip" "$latency" "$cfst_speed" "$source" "$metrics" "tested" "temporary_test_slot"
+  done < "$candidates"
+
+  upsert_single_dns_record "$test_name" "$original_ip"
+  passwall_set_tcp_node "$original_tcp" "$original_acl"
+  CFST_PASSWALL_NODE_RESTART_WAIT="${CFST_PASSWALL_CANDIDATE_RESTART_WAIT:-10}" passwall_restart_for_node_benchmark
+  rm -f "$candidates"
+  command -v update_champion_pool >/dev/null 2>&1 && update_champion_pool
+  echo "status=completed"
+  cat "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE"
 }
 
 current_dns_candidate_rows() {
@@ -3943,6 +4091,7 @@ main() {
     passwall-node-topology) passwall_node_topology_command ;;
     passwall-node-degradation) passwall_node_degradation_command ;;
     passwall-node-benchmark) passwall_node_benchmark_command ;;
+    passwall-candidate-validate) passwall_candidate_validate_command ;;
     passwall-stable-repair) passwall_stable_repair_command ;;
     stability-update) stability_update_command ;;
     stability-verify) stability_verify_command ;;
