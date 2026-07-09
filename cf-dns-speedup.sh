@@ -200,6 +200,8 @@ load_config() {
   CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE="${CFST_PASSWALL_STABLE_REPAIR_MIN_STABLE:-3}"
   CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES="${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
   CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS:-7200}"
+  CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS:-86400}"
+  CFST_PASSWALL_LOW_IP_RECENT_ROWS="${CFST_PASSWALL_LOW_IP_RECENT_ROWS:-24}"
   CFST_PASSWALL_DEGRADED_WARN_COUNT="${CFST_PASSWALL_DEGRADED_WARN_COUNT:-2}"
   CFST_DNS_HEALTH_RETRIES="${CFST_DNS_HEALTH_RETRIES:-3}"
   CFST_DNS_HEALTH_API_RETRIES="${CFST_DNS_HEALTH_API_RETRIES:-2}"
@@ -1120,6 +1122,51 @@ passwall_measure_current_node() {
   printf '%s\t%s\t%s\t%s\t%s\n' "$bytes" "$total" "$speed" "$mbps" "$http"
 }
 
+passwall_resolve_ipv4() {
+  local name="$1"
+  case "$name" in
+    "") return 0 ;;
+    *[!0-9.]* ) ;;
+    *.*.*.* ) printf '%s\n' "$name"; return 0 ;;
+  esac
+  command -v nslookup >/dev/null 2>&1 || return 0
+  nslookup "$name" 2>/dev/null | awk '
+    /^Address [0-9]+: / && $3 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {ip=$3}
+    /^Address: / && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {ip=$2}
+    END {if (ip != "") print ip}
+  '
+}
+
+ensure_passwall_node_history_file() {
+  if [ ! -s "$PASSWALL_NODE_HISTORY_FILE" ]; then
+    printf 'observed_at\tsection\tremarks\taddress\tport\tbytes\ttotal_s\tspeed_bps\tspeed_MBps\thttp\tstatus\tresolved_ip\n' > "$PASSWALL_NODE_HISTORY_FILE"
+    return 0
+  fi
+  if ! head -n 1 "$PASSWALL_NODE_HISTORY_FILE" | grep -q 'resolved_ip'; then
+    local tmp
+    tmp="$PASSWALL_NODE_HISTORY_FILE.tmp.$$"
+    awk 'NR == 1 {print $0 "\tresolved_ip"; next} {print $0 "\t"}' "$PASSWALL_NODE_HISTORY_FILE" > "$tmp" && mv "$tmp" "$PASSWALL_NODE_HISTORY_FILE"
+  fi
+}
+
+passwall_append_node_history_row() {
+  local section="$1"
+  local metrics="$2"
+  local remarks address port bytes total speed_bps speed_mbps http status resolved_ip
+  remarks="$(uci -q get "passwall.$section.remarks" 2>/dev/null || echo unknown)"
+  address="$(uci -q get "passwall.$section.address" 2>/dev/null || echo unknown)"
+  port="$(uci -q get "passwall.$section.port" 2>/dev/null || echo unknown)"
+  IFS="$(printf '\t')" read -r bytes total speed_bps speed_mbps http <<EOF
+$metrics
+EOF
+  status="$(awk -v speed="$speed_mbps" -v http="$http" -v min="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" 'BEGIN{print (http == "200" && speed >= min) ? "ok" : "degraded"}')"
+  resolved_ip="$(passwall_resolve_ipv4 "$address")"
+  ensure_passwall_node_history_file
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date '+%F %T')" "$section" "$remarks" "$address" "$port" \
+    "$bytes" "$total" "$speed_bps" "$speed_mbps" "$http" "$status" "$resolved_ip" >> "$PASSWALL_NODE_HISTORY_FILE"
+}
+
 passwall_node_report_row() {
   local section="$1"
   local metrics="$2"
@@ -1178,6 +1225,7 @@ passwall_node_benchmark_command() {
     passwall_restart_for_node_benchmark
     metrics="$(passwall_measure_current_node "$section")"
     passwall_node_report_row "$section" "$metrics" | tee -a "$PASSWALL_NODE_REPORT_FILE"
+    passwall_append_node_history_row "$section" "$metrics"
     speed="$(printf '%s\n' "$metrics" | awk -F '\t' '{print int($3+0)}')"
     http="$(printf '%s\n' "$metrics" | awk -F '\t' '{print $5}')"
     if [ "$http" = "200" ] && [ "$speed" -gt "$best_speed" ]; then
@@ -2534,11 +2582,53 @@ passwall_stable_repair_cooldown_line() {
   ' "$PASSWALL_STABLE_REPAIR_STATE_FILE"
 }
 
+passwall_stable_repair_quarantine_ips() {
+  [ -s "$PASSWALL_STABLE_REPAIR_STATE_FILE" ] || return 0
+  local now
+  now="$(date +%s 2>/dev/null || echo 0)"
+  awk -F '\t' \
+    -v now="$now" \
+    -v quarantine="${CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS:-86400}" '
+    NR > 1 {
+      epoch=$1+0
+      if (epoch > 0 && now > 0 && now-epoch < quarantine) {
+        if ($4 != "") print $4
+        if ($5 != "") print $5
+      }
+    }
+  ' "$PASSWALL_STABLE_REPAIR_STATE_FILE" | awk '!seen[$1]++'
+}
+
+passwall_recent_low_resolved_ips() {
+  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || return 0
+  local recent_rows
+  recent_rows="${CFST_PASSWALL_LOW_IP_RECENT_ROWS:-24}"
+  tail -n "$recent_rows" "$PASSWALL_NODE_HISTORY_FILE" 2>/dev/null | awk -F '\t' \
+    -v min_speed="${CFST_PASSWALL_NODE_MIN_MBPS:-6.5}" '
+    $12 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && ($11 == "degraded" || ($9 + 0) < min_speed) {
+      print $12
+    }
+  ' | awk '!seen[$1]++'
+}
+
 stable_repair_candidate_rows() {
   [ -s "$CHAMPION_POOL_FILE" ] || return 0
-  awk -F '\t' -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" '
+  local blocked_file
+  blocked_file="$APP_DIR/passwall-stable-repair.blocked.tmp"
+  {
+    passwall_stable_repair_quarantine_ips
+    passwall_recent_low_resolved_ips
+  } > "$blocked_file"
+  awk -F '\t' -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" -v blocked_file="$blocked_file" '
+    BEGIN {
+      while ((getline blocked_ip < blocked_file) > 0) {
+        gsub(/\r/, "", blocked_ip)
+        if (blocked_ip != "") blocked[blocked_ip]=1
+      }
+      close(blocked_file)
+    }
     NR == 1 {next}
-    $1 != "" && $9 == "stable" && $18 == "1" && ($4 + 0) >= min_speed {
+    $1 != "" && !($1 in blocked) && $9 == "stable" && $18 == "1" && ($4 + 0) >= min_speed {
       ip[++n]=$1
       stable_score[n]=$10+0
       recent[n]=$4+0
@@ -2558,6 +2648,7 @@ stable_repair_candidate_rows() {
       for (i=1; i<=n; i++) print ip[i] "\t" stable_score[i] "\t" recent[i] "\t" best[i]
     }
   ' "$CHAMPION_POOL_FILE"
+  rm -f "$blocked_file"
 }
 
 passwall_stable_repair_plan_rows() {

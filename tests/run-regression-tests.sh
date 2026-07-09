@@ -412,8 +412,20 @@ EOF
 passwall_stable_repair_plan_rows > "$PASSWALL_STABLE_REPAIR_REPORT_FILE"
 awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.2" && $3 == "104.17.10.2" && $4 == "skip_cooldown" && $5 ~ /old_ip=104.17.10.1/ {found=1} END {exit found ? 0 : 1}' "$PASSWALL_STABLE_REPAIR_REPORT_FILE" \
   || fail "passwall stable repair should not flap during cooldown"
+stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.cooldown.tsv"
+awk -F '\t' '$1 == "104.17.10.1" || $1 == "104.17.10.2" {bad=1} $1 == "104.17.10.3" {good=1} END {exit (!bad && good) ? 0 : 1}' "$TMP_DIR/stable-repair-candidates.cooldown.tsv" \
+  || fail "passwall stable repair should quarantine recently replaced IPs"
 rm -f "$PASSWALL_STABLE_REPAIR_STATE_FILE"
 pass "passwall stable repair cooldown prevents immediate flapping"
+
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
+2026-07-05 09:05:00	sectionA	auto2	auto2.example.test	443	5242880	3.0	1700000	1.62	200	degraded	104.17.10.3
+EOF
+stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.low-ip.tsv"
+awk -F '\t' '$1 == "104.17.10.3" {bad=1} $1 == "104.17.10.2" {good=1} END {exit (!bad && good) ? 0 : 1}' "$TMP_DIR/stable-repair-candidates.low-ip.tsv" \
+  || fail "passwall stable repair should avoid recently low-throughput resolved IPs"
+pass "passwall stable repair avoids recent low-throughput resolved IPs"
 
 cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
 observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
@@ -553,6 +565,7 @@ PASSWALL_CONFIG_FILE="$TMP_DIR/passwall.config"
 CFST_PASSWALL_NODE_SECTIONS="slowNode fastNode"
 CFST_PASSWALL_NODE_APPLY=1
 CFST_PASSWALL_NODE_RESTART_WAIT=0
+rm -f "$PASSWALL_NODE_HISTORY_FILE"
 current_passwall_node="slowNode"
 current_acl_node="slowNode"
 printf 'config passwall\n' > "$PASSWALL_CONFIG_FILE"
@@ -582,6 +595,13 @@ uci() {
     *) return 1 ;;
   esac
 }
+nslookup() {
+  case "$1" in
+    auto.example.test) printf 'Name: %s\nAddress 1: 104.17.10.1\n' "$1" ;;
+    auto3.example.test) printf 'Name: %s\nAddress 1: 104.17.10.3\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
 current_passwall_node="slowNode"
 current_acl_node="fastNode"
 passwall_node_topology_command > "$TMP_DIR/passwall-node-topology.out"
@@ -608,6 +628,8 @@ passwall_node_benchmark_command > "$TMP_DIR/passwall-node.out"
 grep -q '^selected=fastNode$' "$TMP_DIR/passwall-node.out" || fail "passwall node benchmark should report selected node"
 awk -F '\t' '$1 == "fastNode" && $8 == "8.00" && $9 == "200" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_REPORT_FILE" \
   || fail "passwall node benchmark should write parseable throughput report"
+awk -F '\t' '$2 == "slowNode" && $9 == "4.00" && $11 == "degraded" && $12 == "104.17.10.1" {slow=1} $2 == "fastNode" && $9 == "8.00" && $11 == "ok" && $12 == "104.17.10.3" {fast=1} END {exit (slow && fast) ? 0 : 1}' "$PASSWALL_NODE_HISTORY_FILE" \
+  || fail "passwall node benchmark should append resolved IP throughput history"
 pass "passwall node benchmark selects the fastest end-to-end proxy node"
 
 echo "all regression tests passed"

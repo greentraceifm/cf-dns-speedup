@@ -14,6 +14,33 @@ log() {
   printf '%s %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG_FILE"
 }
 
+resolve_ipv4() {
+  local name="$1"
+  case "$name" in
+    "") return 0 ;;
+    *[!0-9.]* ) ;;
+    *.*.*.* ) printf '%s\n' "$name"; return 0 ;;
+  esac
+  command -v nslookup >/dev/null 2>&1 || return 0
+  nslookup "$name" 2>/dev/null | awk '
+    /^Address [0-9]+: / && $3 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {ip=$3}
+    /^Address: / && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {ip=$2}
+    END {if (ip != "") print ip}
+  '
+}
+
+ensure_history_file() {
+  if [ ! -s "$HISTORY_FILE" ]; then
+    printf 'observed_at\tsection\tremarks\taddress\tport\tbytes\ttotal_s\tspeed_bps\tspeed_MBps\thttp\tstatus\tresolved_ip\n' > "$HISTORY_FILE"
+    return 0
+  fi
+  if ! head -n 1 "$HISTORY_FILE" | grep -q 'resolved_ip'; then
+    local tmp
+    tmp="$HISTORY_FILE.tmp.$$"
+    awk 'NR == 1 {print $0 "\tresolved_ip"; next} {print $0 "\t"}' "$HISTORY_FILE" > "$tmp" && mv "$tmp" "$HISTORY_FILE"
+  fi
+}
+
 cleanup() {
   rmdir "$LOCK_DIR" 2>/dev/null || true
 }
@@ -47,13 +74,13 @@ if [ ! -s "$REPORT_FILE" ]; then
   exit 0
 fi
 
-if [ ! -s "$HISTORY_FILE" ]; then
-  printf 'observed_at\tsection\tremarks\taddress\tport\tbytes\ttotal_s\tspeed_bps\tspeed_MBps\thttp\tstatus\n' > "$HISTORY_FILE"
-fi
+ensure_history_file
 
 status="$(awk -F= '/^status=/ {print $2; found=1} END{if(!found) print "unknown"}' /tmp/passwall-node-observe.out)"
-awk -F '\t' -v now="$(date '+%F %T')" -v status="$status" 'NR == 2 {print now "\t" $0 "\t" status}' "$REPORT_FILE" >> "$HISTORY_FILE"
-awk -F '\t' 'NR == 2 {printf "observed global node: section=%s address=%s speed_MBps=%s http=%s\n", $1, $3, $8, $9}' "$REPORT_FILE" |
+address="$(awk -F '\t' 'NR == 2 {print $3; exit}' "$REPORT_FILE")"
+resolved_ip="$(resolve_ipv4 "$address")"
+awk -F '\t' -v now="$(date '+%F %T')" -v status="$status" -v resolved_ip="$resolved_ip" 'NR == 2 {print now "\t" $0 "\t" status "\t" resolved_ip}' "$REPORT_FILE" >> "$HISTORY_FILE"
+awk -F '\t' -v resolved_ip="$resolved_ip" 'NR == 2 {printf "observed global node: section=%s address=%s resolved_ip=%s speed_MBps=%s http=%s\n", $1, $3, resolved_ip, $8, $9}' "$REPORT_FILE" |
   while IFS= read -r line; do log "$line"; done
 if [ -s "$TOPOLOGY_FILE" ]; then
   awk -F '\t' 'NR > 1 {printf "topology: role=%s section=%s address=%s sources=%s status=%s\n", $1, $2, $4, $6, $7}' "$TOPOLOGY_FILE" |
