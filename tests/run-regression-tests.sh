@@ -657,6 +657,24 @@ grep -q '^status=dry_run$' "$TMP_DIR/passwall-candidate-validate-dry.out" \
   || fail "passwall candidate validation should default to dry-run"
 awk -F '\t' '$2 == "104.17.20.1" && $8 == "planned" && $9 == "dry_run" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
   || fail "passwall candidate validation dry-run should report planned candidates"
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.20.3	122.00	8.40	8.40	8.50	2	new
+EOF
+CFST_CANDIDATE_CULTIVATION_MIN_SPEED=10
+CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED=6.5
+CFST_PASSWALL_CANDIDATE_LIMIT=1
+CFST_PASSWALL_CANDIDATE_RAW_LIMIT=1
+passwall_candidate_validate_command > "$TMP_DIR/passwall-candidate-validate-source-floor.out"
+awk -F '\t' '$2 == "104.17.20.3" && $8 == "planned" && $9 == "dry_run" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
+  || fail "passwall candidate validation should use its own source floor before real proxy gate"
+unset CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED
+CFST_CANDIDATE_CULTIVATION_MIN_SPEED=8
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.20.1	120.00	11.00	11.00	11.20	2	new
+104.17.20.2	121.00	10.00	10.00	10.30	2	new
+EOF
 cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
 observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
 2026-07-09 09:00:00	testNode	test	auto4.example.test	443	20971520	5.0	4194304	4.00	200	degraded	104.17.20.1
@@ -703,6 +721,7 @@ nslookup() {
   printf 'Name: %s\nAddress 1: %s\n' "$1" "$current_test_ip"
 }
 passwall_measure_current_node() {
+  read -r _maybe_consumed_stdin || true
   case "$current_test_ip" in
     104.17.20.1) printf '20971520\t2.500000\t8388608\t8.00\t200\n' ;;
     104.17.20.2) printf '20971520\t5.000000\t4194304\t4.00\t200\n' ;;

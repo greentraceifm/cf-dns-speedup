@@ -208,6 +208,7 @@ load_config() {
   CFST_PASSWALL_CANDIDATE_LIMIT="${CFST_PASSWALL_CANDIDATE_LIMIT:-3}"
   CFST_PASSWALL_CANDIDATE_RAW_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
   CFST_PASSWALL_CANDIDATE_MIN_MBPS="${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}"
+  CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED="${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-$CFST_PASSWALL_CANDIDATE_MIN_MBPS}"
   CFST_PASSWALL_CANDIDATE_TEST_NAME="${CFST_PASSWALL_CANDIDATE_TEST_NAME:-auto4.greentraceifm.top}"
   CFST_PASSWALL_CANDIDATE_TEST_SECTION="${CFST_PASSWALL_CANDIDATE_TEST_SECTION:-RcklmTES}"
   CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS="${CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS:-75}"
@@ -1264,14 +1265,22 @@ passwall_candidate_validate_candidate_rows() {
   local candidates blocked
   candidates="$APP_DIR/passwall-candidate-validate.raw-candidates.tmp"
   blocked="$APP_DIR/passwall-candidate-validate.blocked.tsv"
-  local old_limit
+  local old_limit old_min source_min
   old_limit="${CFST_CANDIDATE_CULTIVATION_LIMIT:-}"
+  old_min="${CFST_CANDIDATE_CULTIVATION_MIN_SPEED:-}"
+  source_min="${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}}"
   CFST_CANDIDATE_CULTIVATION_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
+  CFST_CANDIDATE_CULTIVATION_MIN_SPEED="$source_min"
   cultivation_candidate_rows > "$candidates"
   if [ -n "$old_limit" ]; then
     CFST_CANDIDATE_CULTIVATION_LIMIT="$old_limit"
   else
     unset CFST_CANDIDATE_CULTIVATION_LIMIT
+  fi
+  if [ -n "$old_min" ]; then
+    CFST_CANDIDATE_CULTIVATION_MIN_SPEED="$old_min"
+  else
+    unset CFST_CANDIDATE_CULTIVATION_MIN_SPEED
   fi
   passwall_recent_low_resolved_ips > "$blocked"
   awk -F '\t' -v blocked_file="$blocked" -v limit="${CFST_PASSWALL_CANDIDATE_LIMIT:-3}" '
@@ -1334,6 +1343,7 @@ passwall_candidate_validate_command() {
   printf 'apply=%s\n' "$apply"
   printf 'limit=%s\n' "${CFST_PASSWALL_CANDIDATE_LIMIT:-3}"
   printf 'min_mbps=%s\n' "${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}"
+  printf 'source_min_mbps=%s\n' "${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}}"
   printf 'test_name=%s\n' "$test_name"
   printf 'test_section=%s\n' "$test_section"
 
@@ -1374,7 +1384,7 @@ passwall_candidate_validate_command() {
   printf 'original_tcp=%s\n' "$original_tcp"
   printf 'original_ip=%s\n' "$original_ip"
 
-  while IFS="$(printf '\t')" read -r ip latency cfst_speed source; do
+  while IFS="$(printf '\t')" read -r ip latency cfst_speed source <&3; do
     [ -n "$ip" ] || continue
     local metrics previous_wait
     upsert_single_dns_record "$test_name" "$ip"
@@ -1386,7 +1396,7 @@ passwall_candidate_validate_command() {
     passwall_node_report_row "$test_section" "$metrics" > "$PASSWALL_NODE_REPORT_FILE"
     passwall_append_node_history_row "$test_section" "$metrics"
     passwall_candidate_record_result "$ip" "$latency" "$cfst_speed" "$source" "$metrics" "tested" "temporary_test_slot"
-  done < "$candidates"
+  done 3< "$candidates"
 
   upsert_single_dns_record "$test_name" "$original_ip"
   passwall_set_tcp_node "$original_tcp" "$original_acl"
