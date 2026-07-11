@@ -193,6 +193,7 @@ load_config() {
   CFST_EXTERNAL_OBSERVATION_POOL="${CFST_EXTERNAL_OBSERVATION_POOL:-1}"
   CFST_EXTERNAL_PROMOTION_ROUNDS="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}"
   CFST_EXTERNAL_PROMOTION_MIN_SPEED="${CFST_EXTERNAL_PROMOTION_MIN_SPEED:-0}"
+  CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS="${CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS:-$CFST_STABILITY_TEST_ROUNDS}"
   CFST_EXTERNAL_OBSERVATION_EVICT_FAILS="${CFST_EXTERNAL_OBSERVATION_EVICT_FAILS:-3}"
   CFST_PASSWALL_STABLE_REPAIR="${CFST_PASSWALL_STABLE_REPAIR:-1}"
   CFST_PASSWALL_STABLE_REPAIR_APPLY="${CFST_PASSWALL_STABLE_REPAIR_APPLY:-0}"
@@ -202,6 +203,8 @@ load_config() {
   CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES="${CFST_PASSWALL_STABLE_REPAIR_MAX_UPDATES:-1}"
   CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_COOLDOWN_SECONDS:-7200}"
   CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS="${CFST_PASSWALL_STABLE_REPAIR_QUARANTINE_SECONDS:-86400}"
+  CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS="${CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS:-1}"
+  CFST_PASSWALL_REAL_PASS_RECENT_ROWS="${CFST_PASSWALL_REAL_PASS_RECENT_ROWS:-200}"
   CFST_PASSWALL_LOW_IP_RECENT_ROWS="${CFST_PASSWALL_LOW_IP_RECENT_ROWS:-24}"
   CFST_PASSWALL_CANDIDATE_VALIDATE="${CFST_PASSWALL_CANDIDATE_VALIDATE:-1}"
   CFST_PASSWALL_CANDIDATE_APPLY="${CFST_PASSWALL_CANDIDATE_APPLY:-0}"
@@ -209,6 +212,8 @@ load_config() {
   CFST_PASSWALL_CANDIDATE_RAW_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
   CFST_PASSWALL_CANDIDATE_MIN_MBPS="${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}"
   CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED="${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-$CFST_PASSWALL_CANDIDATE_MIN_MBPS}"
+  CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION="${CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION:-1}"
+  CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT="${CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT:-5}"
   CFST_PASSWALL_CANDIDATE_TEST_NAME="${CFST_PASSWALL_CANDIDATE_TEST_NAME:-auto4.greentraceifm.top}"
   CFST_PASSWALL_CANDIDATE_TEST_SECTION="${CFST_PASSWALL_CANDIDATE_TEST_SECTION:-RcklmTES}"
   CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS="${CFST_PASSWALL_CANDIDATE_DNS_WAIT_SECONDS:-75}"
@@ -271,8 +276,11 @@ normalize_external_candidate_config() {
   CFST_EXTERNAL_CANDIDATE_MAX_BYTES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_BYTES" 'BEGIN {v+=0; if (v < 1024) v=1048576; print int(v)}')"
   CFST_EXTERNAL_CANDIDATE_MAX_LINES="$(awk -v v="$CFST_EXTERNAL_CANDIDATE_MAX_LINES" 'BEGIN {v+=0; if (v < 1) v=20000; print int(v)}')"
   CFST_EXTERNAL_PROMOTION_ROUNDS="$(awk -v v="$CFST_EXTERNAL_PROMOTION_ROUNDS" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
-  CFST_EXTERNAL_PROMOTION_MIN_SPEED="$(awk -v v="$CFST_EXTERNAL_PROMOTION_MIN_SPEED" 'BEGIN {v+=0; if (v < 0) v=0; printf "%.2f", v}')"
+  CFST_EXTERNAL_PROMOTION_MIN_SPEED="$(awk -v v="$CFST_EXTERNAL_PROMOTION_MIN_SPEED" -v fallback="$CFST_STABLE_SLOT_FALLBACK_MIN_SPEED" 'BEGIN {v+=0; fallback+=0; if (v <= 0) v=fallback; printf "%.2f", v}')"
+  CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS="$(awk -v v="$CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS" 'BEGIN {v+=0; if (v < 1) v=1; print int(v)}')"
   CFST_EXTERNAL_OBSERVATION_EVICT_FAILS="$(awk -v v="$CFST_EXTERNAL_OBSERVATION_EVICT_FAILS" 'BEGIN {v+=0; if (v < 1) v=3; print int(v)}')"
+  CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT="$(awk -v v="$CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT" 'BEGIN {v+=0; if (v < 0) v=0; print int(v)}')"
+  CFST_PASSWALL_REAL_PASS_RECENT_ROWS="$(awk -v v="$CFST_PASSWALL_REAL_PASS_RECENT_ROWS" 'BEGIN {v+=0; if (v < 1) v=200; print int(v)}')"
   case "$CFST_EXTERNAL_CANDIDATE_MODE" in
     append) ;;
     *) CFST_EXTERNAL_CANDIDATE_MODE="append" ;;
@@ -1260,10 +1268,47 @@ passwall_node_benchmark_command() {
   fi
 }
 
+passwall_external_observation_candidate_rows() {
+  [ "${CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION:-1}" = "1" ] || return 0
+  [ -s "$EXTERNAL_OBSERVATION_POOL_FILE" ] || return 0
+  awk -F '\t' \
+    -v min_speed="${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}}" \
+    -v promotion_rounds="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}" \
+    -v limit="${CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT:-5}" '
+    NR == 1 {next}
+    $1 != "" && $12 == "eligible_manual_review" && ($4 + 0) >= min_speed && ($7 + 0) >= promotion_rounds {
+      ip[++n]=$1
+      recent[n]=$4+0
+      passes[n]=$7+0
+      best[n]=$2+0
+      source[n]=$11
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        pick=i
+        for (j=i+1; j<=n; j++) {
+          if (recent[j] > recent[pick] || (recent[j] == recent[pick] && passes[j] > passes[pick]) || (recent[j] == recent[pick] && passes[j] == passes[pick] && best[j] > best[pick])) pick=j
+        }
+        tmp=ip[i]; ip[i]=ip[pick]; ip[pick]=tmp
+        tmp=recent[i]; recent[i]=recent[pick]; recent[pick]=tmp
+        tmp=passes[i]; passes[i]=passes[pick]; passes[pick]=tmp
+        tmp=best[i]; best[i]=best[pick]; best[pick]=tmp
+        tmp=source[i]; source[i]=source[pick]; source[pick]=tmp
+      }
+      for (i=1; i<=n && i<=limit; i++) {
+        label="external_observation"
+        if (source[i] != "") label=label ":" source[i]
+        print ip[i] "\t0\t" recent[i] "\t" label
+      }
+    }
+  ' "$EXTERNAL_OBSERVATION_POOL_FILE"
+}
+
 passwall_candidate_validate_candidate_rows() {
   [ "${CFST_PASSWALL_CANDIDATE_VALIDATE:-1}" = "1" ] || return 0
-  local candidates blocked
+  local candidates sources blocked
   candidates="$APP_DIR/passwall-candidate-validate.raw-candidates.tmp"
+  sources="$APP_DIR/passwall-candidate-validate.source-candidates.tmp"
   blocked="$APP_DIR/passwall-candidate-validate.blocked.tsv"
   local old_limit old_min source_min
   old_limit="${CFST_CANDIDATE_CULTIVATION_LIMIT:-}"
@@ -1271,7 +1316,15 @@ passwall_candidate_validate_candidate_rows() {
   source_min="${CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED:-${CFST_PASSWALL_CANDIDATE_MIN_MBPS:-6.5}}"
   CFST_CANDIDATE_CULTIVATION_LIMIT="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}"
   CFST_CANDIDATE_CULTIVATION_MIN_SPEED="$source_min"
-  cultivation_candidate_rows > "$candidates"
+  : > "$sources"
+  passwall_external_observation_candidate_rows >> "$sources"
+  cultivation_candidate_rows >> "$sources"
+  awk -F '\t' -v limit="${CFST_PASSWALL_CANDIDATE_RAW_LIMIT:-20}" '
+    $1 != "" && !seen[$1]++ && printed < limit {
+      print
+      printed++
+    }
+  ' "$sources" > "$candidates"
   if [ -n "$old_limit" ]; then
     CFST_CANDIDATE_CULTIVATION_LIMIT="$old_limit"
   else
@@ -1296,7 +1349,7 @@ passwall_candidate_validate_candidate_rows() {
       printed++
     }
   ' "$candidates"
-  rm -f "$candidates" "$blocked"
+  rm -f "$candidates" "$sources" "$blocked"
 }
 
 passwall_candidate_original_ip() {
@@ -2008,7 +2061,8 @@ update_external_observation_pool() {
     -v now="$now" \
     -v source_label="$source_label" \
     -v min_speed="${CFST_EXTERNAL_PROMOTION_MIN_SPEED:-0}" \
-    -v rounds="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}" \
+    -v promotion_rounds="${CFST_EXTERNAL_PROMOTION_ROUNDS:-3}" \
+    -v min_ok_rounds="${CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS:-1}" \
     -v evict="${CFST_EXTERNAL_OBSERVATION_EVICT_FAILS:-3}" '
     function clean(v) {
       gsub(/[\t\r\n[:cntrl:]]+/, "_", v)
@@ -2033,7 +2087,7 @@ update_external_observation_pool() {
       if ($1 == "") next
       ip=$1
       min=$4+0; avg=$5+0; ok=$6+0
-      good=(ok >= rounds && min >= min_speed)
+      good=(ok >= min_ok_rounds && min >= min_speed)
       if (!(ip in seen)) {
         order[++order_count]=ip
         first[ip]=now; best_min[ip]=0; best_avg[ip]=0; recent[ip]=0
@@ -2048,7 +2102,7 @@ update_external_observation_pool() {
         fail[ip]++; cfail[ip]++; cpass[ip]=0
       }
       if (cfail[ip] >= evict) status[ip]="degraded"
-      else if (cpass[ip] >= rounds && min >= min_speed) status[ip]="eligible_manual_review"
+      else if (cpass[ip] >= promotion_rounds && min >= min_speed) status[ip]="eligible_manual_review"
       else status[ip]="observing"
     }
     END {
@@ -2769,24 +2823,58 @@ passwall_recent_low_resolved_ips() {
   ' | awk '!seen[$1]++'
 }
 
+passwall_real_qualified_ips() {
+  [ -s "$PASSWALL_NODE_HISTORY_FILE" ] || return 0
+  local recent_rows
+  recent_rows="${CFST_PASSWALL_REAL_PASS_RECENT_ROWS:-200}"
+  tail -n "$recent_rows" "$PASSWALL_NODE_HISTORY_FILE" 2>/dev/null | awk -F '\t' \
+    -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" '
+    $12 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+      ip=$12
+      if (!(ip in seen)) order[++n]=ip
+      seen[ip]=1
+      speed[ip]=$9+0
+      http[ip]=$10
+      status[ip]=$11
+    }
+    END {
+      for (i=1; i<=n; i++) {
+        ip=order[i]
+        if (http[ip] == "200" && status[ip] == "ok" && speed[ip] >= min_speed) print ip
+      }
+    }
+  '
+}
+
 stable_repair_candidate_rows() {
   [ -s "$CHAMPION_POOL_FILE" ] || return 0
-  local blocked_file
+  local blocked_file qualified_file
   blocked_file="$APP_DIR/passwall-stable-repair.blocked.tmp"
+  qualified_file="$APP_DIR/passwall-stable-repair.real-qualified.tmp"
   {
     passwall_stable_repair_quarantine_ips
     passwall_recent_low_resolved_ips
   } > "$blocked_file"
-  awk -F '\t' -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" -v blocked_file="$blocked_file" '
+  passwall_real_qualified_ips > "$qualified_file"
+  awk -F '\t' \
+    -v min_speed="${CFST_PASSWALL_STABLE_REPAIR_MIN_SPEED:-6.5}" \
+    -v blocked_file="$blocked_file" \
+    -v qualified_file="$qualified_file" \
+    -v require_real="${CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS:-1}" '
     BEGIN {
       while ((getline blocked_ip < blocked_file) > 0) {
         gsub(/\r/, "", blocked_ip)
         if (blocked_ip != "") blocked[blocked_ip]=1
       }
       close(blocked_file)
+      while ((getline qualified_ip < qualified_file) > 0) {
+        gsub(/\r/, "", qualified_ip)
+        if (qualified_ip != "") qualified[qualified_ip]=1
+      }
+      close(qualified_file)
     }
     NR == 1 {next}
-    $1 != "" && !($1 in blocked) && $9 == "stable" && $18 == "1" && ($4 + 0) >= min_speed {
+    $1 != "" && !($1 in blocked) && (require_real != "1" || ($1 in qualified)) && $9 == "stable" && $18 == "1" && ($4 + 0) >= min_speed {
       ip[++n]=$1
       stable_score[n]=$10+0
       recent[n]=$4+0
@@ -2806,7 +2894,7 @@ stable_repair_candidate_rows() {
       for (i=1; i<=n; i++) print ip[i] "\t" stable_score[i] "\t" recent[i] "\t" best[i]
     }
   ' "$CHAMPION_POOL_FILE"
-  rm -f "$blocked_file"
+  rm -f "$blocked_file" "$qualified_file"
 }
 
 passwall_stable_repair_plan_rows() {
@@ -3585,6 +3673,14 @@ health_check_command() {
     printf 'CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT=%s\n' "$CFST_EMERGENCY_RESCUE_TOTAL_TIMEOUT"
     printf 'CFST_EMERGENCY_RESCUE_STABILITY_COUNT=%s\n' "$CFST_EMERGENCY_RESCUE_STABILITY_COUNT"
     printf 'CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS=%s\n' "$CFST_EMERGENCY_RESCUE_STABILITY_ROUNDS"
+    printf 'CFST_EXTERNAL_PROMOTION_ROUNDS=%s\n' "$CFST_EXTERNAL_PROMOTION_ROUNDS"
+    printf 'CFST_EXTERNAL_PROMOTION_MIN_SPEED=%s\n' "$CFST_EXTERNAL_PROMOTION_MIN_SPEED"
+    printf 'CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS=%s\n' "$CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS"
+    printf 'CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED=%s\n' "$CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED"
+    printf 'CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION=%s\n' "$CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION"
+    printf 'CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT=%s\n' "$CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT"
+    printf 'CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS=%s\n' "$CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS"
+    printf 'CFST_PASSWALL_REAL_PASS_RECENT_ROWS=%s\n' "$CFST_PASSWALL_REAL_PASS_RECENT_ROWS"
     printf 'GUARD_REPAIR_REPORT_FILE=%s\n' "$GUARD_REPAIR_REPORT_FILE"
     printf 'EMERGENCY_REFRESH_REPORT_FILE=%s\n' "$EMERGENCY_REFRESH_REPORT_FILE"
     printf 'EMERGENCY_REFRESH_VALIDATE_FILE=%s\n' "$EMERGENCY_REFRESH_VALIDATE_FILE"
@@ -4032,6 +4128,7 @@ observation_report_command() {
     printf 'pool_file=%s\n' "$EXTERNAL_OBSERVATION_POOL_FILE"
     printf 'promotion_rounds=%s\n' "$CFST_EXTERNAL_PROMOTION_ROUNDS"
     printf 'promotion_min_speed=%s\n' "$CFST_EXTERNAL_PROMOTION_MIN_SPEED"
+    printf 'min_ok_rounds_per_observation=%s\n' "$CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS"
     printf 'evict_fails=%s\n' "$CFST_EXTERNAL_OBSERVATION_EVICT_FAILS"
     echo
     echo "=== eligible_manual_review ==="

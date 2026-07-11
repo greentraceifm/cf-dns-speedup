@@ -45,6 +45,7 @@ PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
 PASSWALL_STABLE_REPAIR_STATE_FILE="$TMP_DIR/passwall-stable-repair.state.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
 CHAMPION_LIFECYCLE_AUDIT_FILE="$TMP_DIR/champion-lifecycle-audit.tsv"
+EXTERNAL_OBSERVATION_POOL_FILE="$TMP_DIR/external-observation-pool.tsv"
 
 CFST_DUAL_POOL_MODE=1
 CFST_STABLE_SLOT_MODE=1
@@ -71,6 +72,14 @@ CFST_PRIMARY_GUARD_ENFORCE=1
 CFST_EXPOSED_SLOT_GUARD=1
 CFST_EXPOSED_SLOT_MIN_SPEED=6.5
 CFST_EXPOSED_SLOT_BLOCK_TTL_SECONDS=43200
+CFST_EXTERNAL_PROMOTION_ROUNDS=3
+CFST_EXTERNAL_PROMOTION_MIN_SPEED=6.5
+CFST_EXTERNAL_OBSERVATION_MIN_OK_ROUNDS=2
+CFST_EXTERNAL_OBSERVATION_EVICT_FAILS=3
+CFST_PASSWALL_CANDIDATE_EXTERNAL_OBSERVATION=1
+CFST_PASSWALL_CANDIDATE_EXTERNAL_LIMIT=5
+CFST_PASSWALL_STABLE_REPAIR_REQUIRE_REAL_PASS=1
+CFST_PASSWALL_REAL_PASS_RECENT_ROWS=200
 CFST_GUARD_REPAIR_APPLY=0
 CFST_GUARD_REPAIR_STABLE_MIRROR=1
 CFST_OBSERVE_GUARD_REPAIR_REPORT=1
@@ -376,15 +385,19 @@ awk -F '\t' '$1 == "104.17.10.1" {found=1} END {exit found ? 1 : 0}' "$CANDIDATE
 pass "candidate cultivation validates high-throughput challengers without duplicating current DNS"
 
 cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
-observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status
-2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded
-2026-07-05 15:05:00	sectionA	auto3	auto3.example.test	443	5242880	2.8	1800000	1.72	200	degraded
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
+2026-07-05 09:05:00	sectionA	auto3	auto3.example.test	443	5242880	3.0	1700000	1.62	200	degraded	104.17.10.1
+2026-07-05 09:10:00	testNode	auto4	auto4.example.test	443	20971520	2.4	8738133	8.33	200	ok	104.17.10.2
+2026-07-05 09:15:00	testNode	auto4	auto4.example.test	443	20971520	2.5	8388608	8.00	200	ok	104.17.10.3
+2026-07-05 09:20:00	testNode	auto4	auto4.example.test	443	20971520	2.6	8065969	7.69	200	ok	104.17.10.4
+2026-07-05 15:05:00	sectionA	auto3	auto3.example.test	443	5242880	2.8	1800000	1.72	200	degraded	104.17.10.1
 EOF
 cat > "$CHAMPION_POOL_FILE" <<'EOF'
 ip	best_min_speed	best_avg_speed	recent_min_speed	fail_count	first_seen	last_seen	source	health_status	stable_score	recent_low_count	pool_type	lifecycle_state	lifecycle_reason	observation_count	consecutive_passes	consecutive_lows	promotion_ready
 104.17.10.1	9.00	9.20	8.80	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	30.00	0	stable	stable	ok	10	5	0	1
 104.17.10.2	9.80	9.90	9.70	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	35.00	0	stable	stable	ok	10	5	0	1
 104.17.10.3	9.50	9.60	9.40	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	34.00	0	stable	stable	ok	10	5	0	1
+104.17.10.4	9.20	9.30	9.10	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	20.00	0	stable	stable	ok	10	5	0	1
 104.26.40.1	16.00	16.00	16.00	0	2026-07-05 00:00:00	2026-07-05 00:00:00	new	challenger	-8.00	0	competitive	challenger	no_observation	0	0	0	0
 EOF
 CF_RECORD_NAMES="auto.example.test auto1.example.test auto2.example.test auto3.example.test auto4.example.test"
@@ -406,6 +419,14 @@ awk -F '\t' '$1 == "auto3.example.test" && $2 == "104.17.10.1" && $3 == "104.17.
   || fail "passwall stable repair should plan one-slot stable DNS replacement after consecutive degradation"
 pass "passwall stable repair plans bounded replacement from stable pool"
 
+cat >> "$CHAMPION_POOL_FILE" <<'EOF'
+104.17.10.5	10.00	10.10	9.90	0	2026-07-01 00:00:00	2026-07-05 00:00:00	observation	stable	40.00	0	stable	stable	ok	10	5	0	1
+EOF
+stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.real-gate.tsv"
+awk -F '\t' '$1 == "104.17.10.5" {bad=1} $1 == "104.17.10.2" {good=1} END {exit (!bad && good) ? 0 : 1}' "$TMP_DIR/stable-repair-candidates.real-gate.tsv" \
+  || fail "passwall stable repair should require a real-path pass before using a stable candidate"
+pass "passwall stable repair requires real-path qualification"
+
 cat > "$PASSWALL_STABLE_REPAIR_STATE_FILE" <<EOF
 applied_at_epoch	applied_at	name	old_ip	new_ip
 $(date +%s)	2026-07-08 14:33:41	auto3.example.test	104.17.10.1	104.17.10.2
@@ -421,6 +442,7 @@ pass "passwall stable repair cooldown prevents immediate flapping"
 
 cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
 observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
+2026-07-05 09:00:00	testNode	auto4	auto4.example.test	443	20971520	2.4	8738133	8.33	200	ok	104.17.10.2
 2026-07-05 09:05:00	sectionA	auto2	auto2.example.test	443	5242880	3.0	1700000	1.62	200	degraded	104.17.10.3
 EOF
 stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.low-ip.tsv"
@@ -504,13 +526,20 @@ awk -F '\t' '$1 == "104.17.10.5" && $8 == "observation" && $9 == "stable" && $15
 awk -F '\t' '$1 == "104.17.10.6" {found=1} END {exit found ? 1 : 0}' "$CHAMPION_POOL_FILE" \
   || fail "champion refresh should not admit old observation-only IPs"
 stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.tsv"
+awk -F '\t' '$1 == "104.17.10.5" {found=1} END {exit found ? 1 : 0}' "$TMP_DIR/stable-repair-candidates.tsv" \
+  || fail "stable repair candidates should exclude direct-only promoted IPs before real-path validation"
+cat > "$PASSWALL_NODE_HISTORY_FILE" <<'EOF'
+observed_at	section	remarks	address	port	bytes	total_s	speed_bps	speed_MBps	http	status	resolved_ip
+2026-07-07 11:00:00	testNode	auto4	auto4.example.test	443	20971520	2.7	7767229	7.41	200	ok	104.17.10.5
+EOF
+stable_repair_candidate_rows > "$TMP_DIR/stable-repair-candidates.tsv"
 awk -F '\t' '$1 == "104.17.10.5" && ($3 + 0) >= 7.40 {found=1} END {exit found ? 0 : 1}' "$TMP_DIR/stable-repair-candidates.tsv" \
-  || fail "stable repair candidates should include promoted observation-only IP"
+  || fail "stable repair candidates should include promoted IPs after real-path validation"
 awk -F '\t' '$1 == "104.17.10.6" {found=1} END {exit found ? 1 : 0}' "$TMP_DIR/stable-repair-candidates.tsv" \
   || fail "stable repair candidates should exclude old observation-only IPs"
 grep -q 'champion-refresh)' "$SCRIPT" || fail "champion-refresh command is missing"
 mv "$TMP_DIR/observation-history.before-champion-refresh.tsv" "$OBSERVATION_HISTORY_FILE"
-pass "champion refresh admits observation-only stable IPs"
+pass "champion refresh separates direct stability from real-path repair qualification"
 
 cat > "$OBSERVATION_HISTORY_FILE" <<'EOF'
 observed_at	ip	previous_latency_ms	previous_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds
@@ -616,6 +645,37 @@ current_acl_node="slowNode"
 passwall_restart_for_node_benchmark() { :; }
 acquire_lock() { :; }
 release_lock() { :; }
+
+CFST_EXTERNAL_CANDIDATES=1
+CFST_EXTERNAL_OBSERVATION_POOL=1
+CFST_ISP_PROFILE=cf
+printf '104.17.30.1\n' > "$APP_DIR/external-candidates.runtime.txt"
+cat > "$STABILITY_RESULT_FILE" <<'EOF'
+ip	latency_ms	cfst_speed_mbps	min_speed_mbps	avg_speed_mbps	ok_rounds	source
+104.17.30.1	100.00	9.00	8.50	8.70	2	new
+EOF
+rm -f "$EXTERNAL_OBSERVATION_POOL_FILE"
+update_external_observation_pool
+update_external_observation_pool
+update_external_observation_pool
+awk -F '\t' '$1 == "104.17.30.1" && $5 == "3" && $6 == "0" && $7 == "3" && $12 == "eligible_manual_review" {found=1} END {exit found ? 0 : 1}' "$EXTERNAL_OBSERVATION_POOL_FILE" \
+  || fail "external observation should count a two-round successful run as one promotion pass"
+pass "external observation separates per-run rounds from cross-run promotion"
+
+CFST_PASSWALL_CANDIDATE_APPLY=0
+CFST_PASSWALL_CANDIDATE_LIMIT=1
+CFST_PASSWALL_CANDIDATE_RAW_LIMIT=2
+CFST_PASSWALL_CANDIDATE_SOURCE_MIN_SPEED=6.5
+CFST_PASSWALL_CANDIDATE_TEST_NAME="auto4.example.test"
+CFST_PASSWALL_CANDIDATE_TEST_SECTION="testNode"
+rm -f "$PASSWALL_NODE_HISTORY_FILE"
+passwall_candidate_validate_command > "$TMP_DIR/passwall-candidate-validate-external.out"
+awk -F '\t' '$2 == "104.17.30.1" && $3 ~ /^external_observation:/ && $8 == "planned" && $9 == "dry_run" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE" \
+  || fail "eligible external observations should feed the real PassWall validation queue"
+pass "eligible external observations feed only the PassWall validation queue"
+rm -f "$EXTERNAL_OBSERVATION_POOL_FILE" "$APP_DIR/external-candidates.runtime.txt"
+CFST_EXTERNAL_CANDIDATES=0
+
 passwall_measure_current_node() {
   case "$1" in
     slowNode) printf '20971520\t5.000000\t4194304\t4.00\t200\n' ;;
