@@ -82,6 +82,19 @@ stable repair: blocked_insufficient_stable_pool
 candidate validation: dry_run
 ```
 
+The normal 09:05 PassWall observation then produced a newer end-to-end sample:
+
+```text
+auto current PassWall speed: 0.67 MB/s, degraded
+stable repair: stable_candidates=0, blocked_insufficient_stable_pool
+PassWall: remained running
+lock: none
+```
+
+This scheduled sample did not change DNS or restart PassWall. It confirms that
+the real proxy path is still deteriorating while the new gate prevents an
+unqualified automatic replacement.
+
 The dry-run candidate queue contained only:
 
 ```text
@@ -113,3 +126,12 @@ still pass real-path validation before it can influence `auto`.
 The daily 06:30 scan also stopped PassWall for about 23 minutes. That is a
 separate availability risk and should be redesigned as a no-outage scan path
 before changing the schedule or selection thresholds.
+
+## Records
+
+- GitHub implementation commit: `5d0886a`.
+- Notion append marker: `2026-07-11 External observation promotion and real-path gate`.
+- OpenClaw memory:
+  `/home/ubuntu/.openclaw/workspace/memory/openwrt-cfip-external-observation-real-path-gate-2026-07-11.md`.
+- Local memory:
+  `docs/openwrt-cfip-external-observation-real-path-gate-2026-07-11.md` in the Codex memory backup workspace.
