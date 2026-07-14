@@ -197,6 +197,26 @@ cfst 总超时：3600
 /root/cf-dns-speedup/run.log
 ```
 
+## 无停机 Sidecar 观察
+
+`sidecar/` 提供面向独立 Ubuntu/Docker 主机的无停机观察组件。它使用独立 `ipvlan` 地址进行直连发现，再用临时 Xray 容器串行验证最多 5 个候选，不停止或切换 OpenWrt 上正在运行的 PassWall。
+
+安全边界：
+
+- Sidecar 地址必须在 PassWall 中配置为精确的直连旁路；禁止复用受代理 ACL 控制的主机地址。
+- 运行前检查 Ollama 空闲、系统负载、可用内存、磁盘和既有容器健康状态。
+- Xray 明文配置只通过 systemd encrypted credential 解密到 `/run`。
+- Sidecar 报告只进入观察流程，不更新 Cloudflare DNS，也不直接进入稳定冠军池。
+- `sidecar/router-bypass.sh` 只做 UCI 持久配置和增量 nft 规则，不 reload 或 restart PassWall。
+
+部署前先运行：
+
+```sh
+sidecar/tests/run-tests.sh
+```
+
+生产部署先用单个已知 IP 执行 `canary`，确认独立出口和两轮代理下载都正常后，才启用夜间 timer。`canary` 不运行 50/100 地址直连扫描。
+
 ## 故障排查
 
 查看主日志：

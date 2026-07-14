@@ -1,0 +1,3 @@
+d /run/cfip-sidecar 0700 root root - -
+d /var/lib/cfip-sidecar 0700 root root - -
+d /var/lib/cfip-sidecar/observations 0700 root root - -

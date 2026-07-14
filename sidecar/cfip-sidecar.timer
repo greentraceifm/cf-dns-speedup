@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly CF preferred-IP sidecar observation timer
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+RandomizedDelaySec=5min
+AccuracySec=1min
+Persistent=false
+Unit=cfip-sidecar.service
+
+[Install]
+WantedBy=timers.target

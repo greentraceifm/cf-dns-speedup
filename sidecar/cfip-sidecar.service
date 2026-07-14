@@ -1,0 +1,26 @@
+[Unit]
+Description=CF preferred-IP isolated sidecar observation
+After=docker.service network-online.target ollama.service
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/etc/credstore.encrypted/cfip-sidecar-xray.json
+
+[Service]
+Type=oneshot
+LoadCredentialEncrypted=xray-source:/etc/credstore.encrypted/cfip-sidecar-xray.json
+ExecStart=/opt/cfip-sidecar/cfip-sidecar.sh observe
+TimeoutStartSec=75min
+Nice=10
+CPUWeight=10
+IOWeight=10
+MemoryMax=768M
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/run/cfip-sidecar /var/lib/cfip-sidecar
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
