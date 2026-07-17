@@ -34,6 +34,10 @@ SIDECAR_CANDIDATE_LIMIT="${SIDECAR_CANDIDATE_LIMIT:-5}"
 SIDECAR_PROXY_MIN_MBPS="${SIDECAR_PROXY_MIN_MBPS:-6.5}"
 SIDECAR_PROXY_MIN_BYTES="${SIDECAR_PROXY_MIN_BYTES:-20000000}"
 SIDECAR_PROXY_ROUNDS="${SIDECAR_PROXY_ROUNDS:-2}"
+SIDECAR_DIAG_ALT_URL="${SIDECAR_DIAG_ALT_URL:-https://speed.cloudflare.com/__down?bytes=20000000}"
+SIDECAR_DIAG_XRAY_CPUS="${SIDECAR_DIAG_XRAY_CPUS:-2.0}"
+SIDECAR_DIAG_CURL_CPUS="${SIDECAR_DIAG_CURL_CPUS:-1.0}"
+SIDECAR_DIAG_ROUNDS="${SIDECAR_DIAG_ROUNDS:-2}"
 
 SIDECAR_CFST_THREADS="${SIDECAR_CFST_THREADS:-16}"
 SIDECAR_CFST_TIMEOUT="${SIDECAR_CFST_TIMEOUT:-4}"
@@ -80,8 +84,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 prepare_dirs() {
-  mkdir -p "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR/observations"
-  chmod 700 "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR" "$SIDECAR_DATA_DIR/observations"
+  mkdir -p "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
+  chmod 700 "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR" \
+    "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
 }
 
 acquire_lock() {
@@ -236,14 +241,21 @@ select_candidates() {
 }
 
 start_xray() {
-  local candidate="$1" config="$2" name="$3"
+  local candidate="$1" config="$2" name="$3" target_mode="${4:-candidate}"
+  local cpus="${5:-$SIDECAR_CONTAINER_CPUS}"
+  local -a target_args
+  case "$target_mode" in
+    candidate) target_args=(--candidate "$candidate") ;;
+    profile) target_args=(--preserve-address) ;;
+    *) die "unsupported Xray target mode: $target_mode" ;;
+  esac
   "$PYTHON_BIN" "$SCRIPT_DIR/render-xray-config.py" \
-    --source "$CREDENTIAL_SOURCE" --candidate "$candidate" --output "$config"
+    --source "$CREDENTIAL_SOURCE" "${target_args[@]}" --output "$config"
   chown root:65532 "$config"
   chmod 640 "$config"
   ACTIVE_CONTAINERS="$ACTIVE_CONTAINERS $name"
   "$DOCKER_BIN" run -d --rm --name "$name" --network "$SIDECAR_NETWORK" --ip "$SIDECAR_IP" \
-    --cpus "$SIDECAR_CONTAINER_CPUS" --cpu-shares 128 --memory "$SIDECAR_XRAY_MEMORY" \
+    --cpus "$cpus" --cpu-shares 128 --memory "$SIDECAR_XRAY_MEMORY" \
     $(docker_security_args) --user 65532:65532 --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     -v "$config:/etc/xray/config.json:ro" --entrypoint /usr/local/bin/xray "$SIDECAR_RUNTIME_IMAGE" \
     run -c /etc/xray/config.json >/dev/null
@@ -259,14 +271,14 @@ stop_xray() {
 }
 
 curl_proxy_round() {
-  local xray_name="$1" raw
+  local xray_name="$1" url="${2:-$SIDECAR_TEST_URL}" cpus="${3:-0.5}" raw
   raw="$(
     "$DOCKER_BIN" run --rm --network "container:$xray_name" \
-      --cpus 0.5 --memory "$SIDECAR_CURL_MEMORY" $(docker_security_args) \
+      --cpus "$cpus" --memory "$SIDECAR_CURL_MEMORY" $(docker_security_args) \
       --user 65532:65532 --entrypoint /usr/bin/curl "$SIDECAR_RUNTIME_IMAGE" \
       -sS -L --socks5-hostname 127.0.0.1:1080 --connect-timeout 12 --max-time 70 \
       -o /dev/null -w '%{http_code}\t%{size_download}\t%{speed_download}' \
-      "$SIDECAR_TEST_URL" 2>>"$SIDECAR_RUN_DIR/proxy-curl.log"
+      "$url" 2>>"$SIDECAR_RUN_DIR/proxy-curl.log"
   )" || raw=$'000\t0\t0'
   printf '%s\n' "$raw"
 }
@@ -279,7 +291,7 @@ validate_candidate() {
   config="$SIDECAR_RUN_DIR/xray-${candidate}.json"
   profile_sha="$(sha256sum "$CREDENTIAL_SOURCE" | awk '{print $1}')"
   gate_check
-  start_xray "$candidate" "$config" "$name"
+  start_xray "$candidate" "$config" "$name" candidate "$SIDECAR_CONTAINER_CPUS"
   round=1
   while [ "$round" -le "$SIDECAR_PROXY_ROUNDS" ]; do
     raw="$(curl_proxy_round "$name")"
@@ -304,6 +316,77 @@ validate_candidate() {
     "$observed_at" "$candidate" "$direct_speed" "$speed1" "$speed2" "$min_speed" "$avg_speed" \
     "$http1" "$http2" "$status" "$profile_sha" "sidecar_proxy" >>"$report"
   log "proxy validation: candidate=$candidate min=${min_speed}MB/s avg=${avg_speed}MB/s status=$status"
+}
+
+validate_diagnostic_scenario() {
+  local candidate="$1" scenario="$2" target_mode="$3" endpoint="$4" url="$5"
+  local xray_cpus="$6" curl_cpus="$7" report="$8" name config
+  local round raw http bytes bps speed min_speed avg_speed status observed_at
+  local speed1=0 speed2=0 http1=000 http2=000 bytes1=0 bytes2=0
+  gate_check
+  name="cfip-diag-${scenario}-$$"
+  config="$SIDECAR_RUN_DIR/xray-diag-${scenario}-$$.json"
+  start_xray "$candidate" "$config" "$name" "$target_mode" "$xray_cpus"
+  round=1
+  while [ "$round" -le "$SIDECAR_DIAG_ROUNDS" ]; do
+    raw="$(curl_proxy_round "$name" "$url" "$curl_cpus")"
+    IFS=$'\t' read -r http bytes bps <<<"$raw"
+    speed="$(awk -v bps="${bps:-0}" 'BEGIN {printf "%.2f", (bps + 0) / 1048576}')"
+    if [ "$round" -eq 1 ]; then http1="${http:-000}"; bytes1="${bytes:-0}"; speed1="$speed"; fi
+    if [ "$round" -eq 2 ]; then http2="${http:-000}"; bytes2="${bytes:-0}"; speed2="$speed"; fi
+    round=$((round + 1))
+  done
+  stop_xray "$name"
+  rm -f "$config"
+  min_speed="$(awk -v a="$speed1" -v b="$speed2" 'BEGIN {printf "%.2f", a < b ? a : b}')"
+  avg_speed="$(awk -v a="$speed1" -v b="$speed2" 'BEGIN {printf "%.2f", (a + b) / 2}')"
+  status="low"
+  if [ "$http1" = "200" ] && [ "$http2" = "200" ] \
+    && [ "$bytes1" -ge "$SIDECAR_PROXY_MIN_BYTES" ] && [ "$bytes2" -ge "$SIDECAR_PROXY_MIN_BYTES" ] \
+    && awk -v speed="$min_speed" -v min="$SIDECAR_PROXY_MIN_MBPS" 'BEGIN {exit speed >= min ? 0 : 1}'; then
+    status="pass"
+  fi
+  observed_at="$(date '+%F %T')"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$observed_at" "$candidate" "$scenario" "$target_mode" "$endpoint" "$xray_cpus" \
+    "$curl_cpus" "$speed1" "$speed2" "$min_speed" "$avg_speed" "$http1" "$http2" \
+    "$bytes1" "$bytes2" "$status" "sidecar_diagnostic" >>"$report"
+  log "diagnostic scenario: name=$scenario min=${min_speed}MB/s avg=${avg_speed}MB/s status=$status"
+}
+
+diagnose() {
+  local candidate="${1:-}" run_id report
+  [ -n "$candidate" ] || die "diagnose requires one IPv4 candidate"
+  acquire_lock
+  need_cmd "$DOCKER_BIN"; need_cmd "$CURL_BIN"; need_cmd "$PYTHON_BIN"; need_cmd flock
+  "$PYTHON_BIN" -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$candidate" \
+    || die "diagnose candidate is not a valid IPv4 address"
+  [ "$SIDECAR_DIAG_ROUNDS" -eq 2 ] || die "diagnose requires exactly two rounds"
+  case "$SIDECAR_TEST_URL" in https://*) ;; *) die "primary diagnostic URL must use HTTPS" ;; esac
+  case "$SIDECAR_DIAG_ALT_URL" in https://*) ;; *) die "alternate diagnostic URL must use HTTPS" ;; esac
+  [ "$SIDECAR_TEST_URL" != "$SIDECAR_DIAG_ALT_URL" ] \
+    || die "primary and alternate diagnostic URLs must differ"
+  awk -v x="$SIDECAR_DIAG_XRAY_CPUS" -v c="$SIDECAR_DIAG_CURL_CPUS" \
+    'BEGIN {exit (x > 0 && c > 0) ? 0 : 1}' || die "diagnostic CPU limits must be positive"
+  gate_check
+  network_check || die "sidecar ipvlan network is missing or invalid"
+  image_check
+  [ -r "$CREDENTIAL_SOURCE" ] || die "encrypted systemd credential was not loaded"
+  network_probe
+  run_id="$(date '+%Y%m%d-%H%M%S')"
+  report="$SIDECAR_DATA_DIR/diagnostics/sidecar-diagnostic-$run_id.tsv"
+  printf 'observed_at\treference_candidate_ip\tscenario\ttarget_mode\tendpoint\txray_cpus\tcurl_cpus\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' >"$report"
+  validate_diagnostic_scenario "$candidate" candidate_baseline candidate primary \
+    "$SIDECAR_TEST_URL" "$SIDECAR_CONTAINER_CPUS" 0.5 "$report"
+  validate_diagnostic_scenario "$candidate" candidate_relaxed candidate primary \
+    "$SIDECAR_TEST_URL" "$SIDECAR_DIAG_XRAY_CPUS" "$SIDECAR_DIAG_CURL_CPUS" "$report"
+  validate_diagnostic_scenario "$candidate" profile_relaxed profile primary \
+    "$SIDECAR_TEST_URL" "$SIDECAR_DIAG_XRAY_CPUS" "$SIDECAR_DIAG_CURL_CPUS" "$report"
+  validate_diagnostic_scenario "$candidate" candidate_alt candidate alternate \
+    "$SIDECAR_DIAG_ALT_URL" "$SIDECAR_DIAG_XRAY_CPUS" "$SIDECAR_DIAG_CURL_CPUS" "$report"
+  cp "$report" "$SIDECAR_DATA_DIR/sidecar-diagnostic.latest.tsv"
+  find "$SIDECAR_DATA_DIR/diagnostics" -type f -mtime +30 -delete 2>/dev/null || true
+  log "diagnostic complete: report=$report; no scan, DNS, PassWall, or pool update was attempted"
 }
 
 observe() {
@@ -365,6 +448,7 @@ status() {
   printf 'timer='; systemctl is-enabled cfip-sidecar.timer 2>/dev/null || true
   printf 'service='; systemctl is-active cfip-sidecar.service 2>/dev/null || true
   printf 'latest_report='; [ -s "$SIDECAR_DATA_DIR/sidecar-observation.latest.tsv" ] && echo present || echo absent
+  printf 'latest_diagnostic='; [ -s "$SIDECAR_DATA_DIR/sidecar-diagnostic.latest.tsv" ] && echo present || echo absent
 }
 
 case "${1:-}" in
@@ -372,7 +456,8 @@ case "${1:-}" in
   network-ensure) acquire_lock; network_ensure; echo "network=ok" ;;
   path-check) acquire_lock; gate_check; network_check; image_check; network_probe ;;
   canary) canary "${2:-}" ;;
+  diagnose) diagnose "${2:-}" ;;
   observe) observe ;;
   status) status ;;
-  *) echo "Usage: $0 {preflight|network-ensure|path-check|canary IPv4|observe|status}" >&2; exit 2 ;;
+  *) echo "Usage: $0 {preflight|network-ensure|path-check|canary IPv4|diagnose IPv4|observe|status}" >&2; exit 2 ;;
 esac

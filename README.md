@@ -217,6 +217,14 @@ sidecar/tests/run-tests.sh
 
 生产部署先用单个已知 IP 执行 `canary`，确认独立出口和两轮代理下载都正常后，才启用夜间 timer。`canary` 不运行 50/100 地址直连扫描。
 
+三夜观察完成后，可在维护窗口手工运行单候选路径诊断：
+
+```sh
+systemctl start cfip-sidecar-diagnose@104.17.136.166.service
+```
+
+`diagnose` 不由 timer 调用，也不运行 IP 扫描。它固定串行执行四组两轮下载，对比当前/放宽 CPU 配额、候选 IP/原 profile 地址、主/备用 20 MB 下载端点。报告写入 `/var/lib/cfip-sidecar/diagnostics/`，不包含 profile 地址、凭据或 profile hash。诊断结果只用于定位瓶颈，不更新 DNS、PassWall、冠军池或稳定池。
+
 ## 故障排查
 
 查看主日志：

@@ -31,11 +31,33 @@ class RenderXrayConfigTests(unittest.TestCase):
         config, _ = MODULE.build_config(source, "172.67.1.4")
         self.assertEqual(config["outbounds"][0]["settings"]["vnext"][0]["address"], "172.67.1.4")
 
+    def test_profile_address_can_be_preserved_for_diagnostics(self):
+        source = {
+            "outbounds": [
+                {
+                    "protocol": "vmess",
+                    "tag": "node",
+                    "settings": {"address": "profile.example", "id": "secret"},
+                    "streamSettings": {"sockopt": {"mark": 255, "domainStrategy": "UseIP"}},
+                }
+            ]
+        }
+        config, summary = MODULE.build_config(source, None)
+        outbound = config["outbounds"][0]
+        self.assertEqual(outbound["settings"]["address"], "profile.example")
+        self.assertEqual(outbound["settings"]["id"], "secret")
+        self.assertNotIn("mark", outbound["streamSettings"]["sockopt"])
+        self.assertEqual(summary["target_mode"], "profile")
+
     def test_invalid_candidate_is_rejected(self):
         with self.assertRaises(ValueError): MODULE.build_config({"outbounds": []}, "not-an-ip")
 
     def test_direct_only_config_is_rejected(self):
         with self.assertRaises(ValueError): MODULE.build_config({"outbounds": [{"protocol": "freedom", "tag": "direct"}]}, "104.17.1.2")
+
+    def test_direct_only_profile_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MODULE.build_config({"outbounds": [{"protocol": "freedom", "tag": "direct"}]}, None)
 
 
 if __name__ == "__main__":

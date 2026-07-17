@@ -36,6 +36,19 @@ def replace_server_address(outbound: dict[str, Any], candidate: str) -> int:
     return replaced
 
 
+def has_server_address(outbound: dict[str, Any]) -> bool:
+    settings = outbound.get("settings")
+    if not isinstance(settings, dict):
+        return False
+    if isinstance(settings.get("address"), str):
+        return True
+    return any(
+        isinstance(server, dict) and isinstance(server.get("address"), str)
+        for key in ("vnext", "servers")
+        for server in (settings.get(key) if isinstance(settings.get(key), list) else [])
+    )
+
+
 def remove_router_sockopts(outbound: dict[str, Any]) -> None:
     stream = outbound.get("streamSettings")
     if not isinstance(stream, dict):
@@ -49,23 +62,37 @@ def remove_router_sockopts(outbound: dict[str, Any]) -> None:
         stream.pop("sockopt", None)
 
 
-def build_config(source: dict[str, Any], candidate: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    ipaddress.IPv4Address(candidate)
+def build_config(
+    source: dict[str, Any], candidate: str | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if candidate is not None:
+        ipaddress.IPv4Address(candidate)
     outbounds = copy.deepcopy(source.get("outbounds"))
     if not isinstance(outbounds, list) or not outbounds:
         raise ValueError("source config has no outbounds")
 
     target: dict[str, Any] | None = None
-    for outbound in outbounds:
+    for index, outbound in enumerate(outbounds):
         if not isinstance(outbound, dict):
             continue
         protocol = str(outbound.get("protocol", "")).lower()
         if protocol not in PROXY_PROTOCOLS:
             continue
-        if replace_server_address(outbound, candidate) > 0:
-            remove_router_sockopts(outbound)
-            target = outbound
-            break
+        candidate_outbound = copy.deepcopy(outbound)
+        replaced = (
+            replace_server_address(candidate_outbound, candidate)
+            if candidate is not None
+            else 0
+        )
+        if candidate is None:
+            if not has_server_address(candidate_outbound):
+                continue
+        elif replaced == 0:
+            continue
+        remove_router_sockopts(candidate_outbound)
+        outbounds[index] = candidate_outbound
+        target = candidate_outbound
+        break
 
     if target is None:
         raise ValueError("no supported proxy outbound with an address was found")
@@ -105,6 +132,7 @@ def build_config(source: dict[str, Any], candidate: str) -> tuple[dict[str, Any]
     tls = stream.get("tlsSettings", {}) if isinstance(stream, dict) else {}
     summary = {
         "candidate": candidate,
+        "target_mode": "candidate" if candidate is not None else "profile",
         "protocol": target.get("protocol"),
         "tag": target_tag,
         "network": stream.get("network") if isinstance(stream, dict) else None,
@@ -117,7 +145,9 @@ def build_config(source: dict[str, Any], candidate: str) -> tuple[dict[str, Any]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True)
-    parser.add_argument("--candidate", required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--candidate")
+    target.add_argument("--preserve-address", action="store_true")
     parser.add_argument("--output", required=True)
     parser.add_argument("--summary-output")
     return parser.parse_args()
@@ -128,7 +158,7 @@ def main() -> int:
     source_path = Path(args.source)
     output_path = Path(args.output)
     source = json.loads(source_path.read_text(encoding="utf-8"))
-    config, summary = build_config(source, args.candidate)
+    config, summary = build_config(source, None if args.preserve_address else args.candidate)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(config, separators=(",", ":")), encoding="utf-8")
