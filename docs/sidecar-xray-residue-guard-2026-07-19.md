@@ -74,10 +74,30 @@ Its SHA256 manifest was verified before replacement. Rollback restores only
 `/opt/cfip-sidecar/cfip-sidecar.sh` and does not require a PassWall or network
 service restart.
 
-## Remaining Runtime Gate
+## Runtime Acceptance
 
-The next natural Sidecar observation is expected at approximately 03:33 CST.
-The existing 04:40 supervisor must confirm a new successful report, free lock,
-no residual Xray path or container, unchanged Docker/PassWall health, HTTP 204,
-and three-view DNS consistency. Candidates remain ineligible for stable or
-`auto` control unless they pass the existing real PassWall `6.5 MB/s` gate.
+Marker: `CFIP-SIDECAR-XRAY-RESIDUE-GUARD-RUNTIME-PASS-20260719`
+
+The first natural run after deployment started at 03:33:59 CST and completed
+at 04:03:00 CST with `Result=success`, `ExecMainStatus=0`, and `MainPID=0`.
+The report contained five complete Sidecar proxy rows. Every round returned
+HTTP 200, but all five candidates remained below the `6.5 MB/s` gate:
+
+- direct discovery range: `8.42-37.64 MB/s`
+- Sidecar minimum range: `4.10-4.96 MB/s`
+- Sidecar average range: `4.38-4.99 MB/s`
+- export file: header only, therefore zero qualified candidates
+
+The post-run lock was free, no `xray-*.json` path or Sidecar container
+remained, `cfip-direct` had zero attachments, Docker PID remained `997`, all
+four existing containers were healthy, and Ollama was idle. The installed
+script hash remained exact. PC, OpenClaw, Sidecar, and router Google/YouTube
+checks returned HTTP 204. PassWall retained two Xray processes and all expected
+listeners; no CFIP task or project lock was active. `auto` through `auto4`
+matched across LAN DNS, router DNS, and `1.1.1.1`. Cloudflare API was not
+rechecked.
+
+The residue-guard runtime gate is complete. No candidate was promoted and no
+DNS, stable-pool, champion-pool, PassWall, firewall, route, subscription,
+credential, timer, or service change occurred. The real PassWall `6.5 MB/s`
+gate remains mandatory before any future candidate can control `auto`.
