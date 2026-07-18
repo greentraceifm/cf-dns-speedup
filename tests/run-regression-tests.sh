@@ -29,6 +29,18 @@ head -n "$((MAIN_LINE - 1))" "$SCRIPT" > "$TMP_DIR/lib.sh"
 APP_DIR="$TMP_DIR" . "$TMP_DIR/lib.sh"
 . "$ROOT_DIR/lib/champion-pool.sh"
 
+# The proxy-stop policy must reject unattended stopping and allow only an
+# explicit maintenance-window override.
+PROXY_PLUGIN=1
+CFST_ALLOW_PROXY_STOP=0
+if (assert_proxy_stop_policy) >"$TMP_DIR/proxy-policy-blocked.log" 2>&1; then
+  fail "proxy-stop policy did not fail closed"
+fi
+pass "proxy-stop policy fails closed by default"
+CFST_ALLOW_PROXY_STOP=1
+assert_proxy_stop_policy || fail "explicit maintenance-window override was rejected"
+pass "proxy-stop policy requires explicit override"
+
 APP_DIR="$TMP_DIR"
 OBSERVATION_HISTORY_FILE="$TMP_DIR/observation-history.tsv"
 STABILITY_RESULT_FILE="$TMP_DIR/result.stability.tsv"

@@ -233,6 +233,9 @@ load_config() {
   DRY_RUN="${DRY_RUN_OVERRIDE:-${DRY_RUN:-1}}"
   enforce_external_candidate_safety
   PROXY_PLUGIN="${PROXY_PLUGIN:-0}"
+  # Stopping the active proxy is an explicit maintenance-window action.
+  # Unattended runs must fail closed instead of interrupting user traffic.
+  CFST_ALLOW_PROXY_STOP="${CFST_ALLOW_PROXY_STOP:-0}"
   PROXY_RESTART_WAIT="${PROXY_RESTART_WAIT:-30}"
   TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
   TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
@@ -780,7 +783,16 @@ plugin_to_service() {
   esac
 }
 
+assert_proxy_stop_policy() {
+  PROXY_SERVICE="$(plugin_to_service "$PROXY_PLUGIN")"
+  [ -z "$PROXY_SERVICE" ] && return 0
+  if [ "${CFST_ALLOW_PROXY_STOP:-0}" != "1" ]; then
+    die "proxy stop blocked by safety gate: set CFST_ALLOW_PROXY_STOP=1 only in a supervised maintenance window"
+  fi
+}
+
 stop_proxy_if_needed() {
+  assert_proxy_stop_policy
   PROXY_SERVICE="$(plugin_to_service "$PROXY_PLUGIN")"
   if [ -z "$PROXY_SERVICE" ]; then
     log "代理插件控制：未选择代理插件，不停止任何服务"
@@ -3363,6 +3375,7 @@ send_notifications() {
 }
 
 run_once() {
+  assert_proxy_stop_policy
   acquire_lock
   rotate_logs
   RUN_STARTED_AT="$(date '+%F %T')"
@@ -4078,6 +4091,7 @@ stability_verify_command() {
 }
 
 stability_update_command() {
+  assert_proxy_stop_policy
   acquire_lock
   rotate_logs
   RUN_STARTED_AT="$(date '+%F %T')"
@@ -4164,6 +4178,12 @@ observation_report_command() {
 main() {
   load_config
   source_optional_lib "$APP_DIR/lib/champion-pool.sh"
+  case "${1:-run}" in
+    run|stability-update)
+      # Reject unsafe unattended runs before dependency installation or downloads.
+      assert_proxy_stop_policy
+      ;;
+  esac
   need_cmd curl
   case "${1:-run}" in
     external-candidate-check)
