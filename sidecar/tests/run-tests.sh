@@ -12,7 +12,10 @@ sh -n "$ROOT/sidecar/router-bypass.sh"
 "$PYTHON_BIN" "$ROOT/sidecar/tests/test_render_xray_config.py" 2>&1
 bash "$ROOT/sidecar/tests/test_install_idempotency.sh"
 bash "$ROOT/sidecar/tests/test_diagnostic_contract.sh"
+bash "$ROOT/sidecar/tests/test_path_probe_retry.sh"
 grep -q 'SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP=1' "$ROOT/sidecar/cfip-sidecar.env.example"
+grep -q 'SIDECAR_PATH_CHECK_ATTEMPTS=3' "$ROOT/sidecar/cfip-sidecar.env.example"
+grep -q 'SIDECAR_PATH_CHECK_RETRY_DELAY=3' "$ROOT/sidecar/cfip-sidecar.env.example"
 grep -q 'CFIP Sidecar direct bypass' "$ROOT/sidecar/router-bypass.sh"
 grep -q 'counter return comment' "$ROOT/sidecar/router-bypass.sh"
 if grep -q -- ' -k ' "$ROOT/sidecar/cfip-sidecar.sh"; then

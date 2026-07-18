@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 umask 077
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${SIDECAR_CONFIG_FILE:-/etc/cfip-sidecar/sidecar.env}"
 [ -r "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
@@ -22,6 +22,8 @@ SIDECAR_MAX_LOAD1="${SIDECAR_MAX_LOAD1:-1.0}"
 SIDECAR_MIN_AVAILABLE_MB="${SIDECAR_MIN_AVAILABLE_MB:-4096}"
 SIDECAR_MIN_DISK_MB="${SIDECAR_MIN_DISK_MB:-10240}"
 SIDECAR_PATH_CHECK_URL="${SIDECAR_PATH_CHECK_URL:-https://www.cloudflare.com/cdn-cgi/trace}"
+SIDECAR_PATH_CHECK_ATTEMPTS="${SIDECAR_PATH_CHECK_ATTEMPTS:-3}"
+SIDECAR_PATH_CHECK_RETRY_DELAY="${SIDECAR_PATH_CHECK_RETRY_DELAY:-3}"
 SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP="${SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP:-1}"
 
 SIDECAR_TEST_URL="${SIDECAR_TEST_URL:-https://greentrace-speedtest.pages.dev/20mb.bin}"
@@ -176,23 +178,60 @@ extract_public_ip() {
   fi
 }
 
+validate_path_probe_settings() {
+  case "$SIDECAR_PATH_CHECK_ATTEMPTS" in
+    ''|*[!0-9]*|0) die "SIDECAR_PATH_CHECK_ATTEMPTS must be a positive integer" ;;
+  esac
+  case "$SIDECAR_PATH_CHECK_RETRY_DELAY" in
+    ''|*[!0-9]*) die "SIDECAR_PATH_CHECK_RETRY_DELAY must be a non-negative integer" ;;
+  esac
+}
+
+capture_public_ip_with_retries() {
+  local label="$1"
+  shift
+  local attempt=1 response ip
+  while [ "$attempt" -le "$SIDECAR_PATH_CHECK_ATTEMPTS" ]; do
+    response=""
+    if response="$("$@")"; then
+      ip="$(extract_public_ip "$response")"
+      if [ -n "$ip" ]; then
+        printf '%s\n' "$ip"
+        return 0
+      fi
+    fi
+    if [ "$attempt" -lt "$SIDECAR_PATH_CHECK_ATTEMPTS" ]; then
+      log "$label failed on attempt $attempt/$SIDECAR_PATH_CHECK_ATTEMPTS; retrying in ${SIDECAR_PATH_CHECK_RETRY_DELAY}s" >&2
+      sleep "$SIDECAR_PATH_CHECK_RETRY_DELAY"
+    fi
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+host_public_ip_probe_once() {
+  "$CURL_BIN" -fsS --connect-timeout 6 --max-time 12 "$SIDECAR_PATH_CHECK_URL"
+}
+
+sidecar_public_ip_probe_once() {
+  local name="$1"
+  "$DOCKER_BIN" run --rm --name "$name" --network "$SIDECAR_NETWORK" --ip "$SIDECAR_IP" \
+    --cpus 0.25 --memory "$SIDECAR_CURL_MEMORY" $(docker_security_args) \
+    --user 65532:65532 \
+    --entrypoint /usr/bin/curl "$SIDECAR_RUNTIME_IMAGE" \
+    -fsS --connect-timeout 6 --max-time 12 "$SIDECAR_PATH_CHECK_URL"
+}
+
 network_probe() {
-  local name host_ip sidecar_ip host_response sidecar_response
+  local name host_ip sidecar_ip
+  validate_path_probe_settings
   name="cfip-path-probe-$$"
   ACTIVE_CONTAINERS="$ACTIVE_CONTAINERS $name"
-  host_response="$("$CURL_BIN" -fsS --connect-timeout 6 --max-time 12 "$SIDECAR_PATH_CHECK_URL")" \
+  host_ip="$(capture_public_ip_with_retries "host public-IP probe" host_public_ip_probe_once)" \
     || die "host public-IP probe failed"
-  host_ip="$(extract_public_ip "$host_response")"
-  sidecar_response="$(
-    "$DOCKER_BIN" run --rm --name "$name" --network "$SIDECAR_NETWORK" --ip "$SIDECAR_IP" \
-      --cpus 0.25 --memory "$SIDECAR_CURL_MEMORY" $(docker_security_args) \
-      --user 65532:65532 \
-      --entrypoint /usr/bin/curl "$SIDECAR_RUNTIME_IMAGE" \
-      -fsS --connect-timeout 6 --max-time 12 "$SIDECAR_PATH_CHECK_URL"
-  )" || die "sidecar public-IP probe failed"
-  sidecar_ip="$(extract_public_ip "$sidecar_response")"
+  sidecar_ip="$(capture_public_ip_with_retries "sidecar public-IP probe" sidecar_public_ip_probe_once "$name")" \
+    || die "sidecar public-IP probe failed"
   ACTIVE_CONTAINERS="$(printf '%s\n' "$ACTIVE_CONTAINERS" | sed "s/ $name//")"
-  [ -n "$host_ip" ] && [ -n "$sidecar_ip" ] || die "public-IP probe returned an empty value"
   if [ "$SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP" = "1" ] && [ "$host_ip" = "$sidecar_ip" ]; then
     die "sidecar and proxied host expose the same public IP; direct bypass is not proven"
   fi
@@ -451,13 +490,19 @@ status() {
   printf 'latest_diagnostic='; [ -s "$SIDECAR_DATA_DIR/sidecar-diagnostic.latest.tsv" ] && echo present || echo absent
 }
 
-case "${1:-}" in
-  preflight) acquire_lock; gate_check; network_check; image_check; echo "preflight=ok" ;;
-  network-ensure) acquire_lock; network_ensure; echo "network=ok" ;;
-  path-check) acquire_lock; gate_check; network_check; image_check; network_probe ;;
-  canary) canary "${2:-}" ;;
-  diagnose) diagnose "${2:-}" ;;
-  observe) observe ;;
-  status) status ;;
-  *) echo "Usage: $0 {preflight|network-ensure|path-check|canary IPv4|diagnose IPv4|observe|status}" >&2; exit 2 ;;
-esac
+main() {
+  case "${1:-}" in
+    preflight) acquire_lock; gate_check; network_check; image_check; echo "preflight=ok" ;;
+    network-ensure) acquire_lock; network_ensure; echo "network=ok" ;;
+    path-check) acquire_lock; gate_check; network_check; image_check; network_probe ;;
+    canary) canary "${2:-}" ;;
+    diagnose) diagnose "${2:-}" ;;
+    observe) observe ;;
+    status) status ;;
+    *) echo "Usage: $0 {preflight|network-ensure|path-check|canary IPv4|diagnose IPv4|observe|status}" >&2; exit 2 ;;
+  esac
+}
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

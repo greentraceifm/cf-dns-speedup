@@ -5,7 +5,7 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SCRIPT="$ROOT/cfip-sidecar.sh"
 UNIT="$ROOT/cfip-sidecar-diagnose@.service"
 
-grep -q '^  diagnose) diagnose "${2:-}" ;;$' "$SCRIPT"
+grep -q '^    diagnose) diagnose "${2:-}" ;;$' "$SCRIPT"
 grep -q 'candidate_baseline candidate primary' "$SCRIPT"
 grep -q 'candidate_relaxed candidate primary' "$SCRIPT"
 grep -q 'profile_relaxed profile primary' "$SCRIPT"
