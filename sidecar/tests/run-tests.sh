@@ -2,7 +2,7 @@
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-if ! "$PYTHON_BIN" --version >/dev/null 2>&1; then
+if ! "$PYTHON_BIN" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
   PYTHON_BIN=python
 fi
 bash -n "$ROOT/sidecar/cfip-sidecar.sh"

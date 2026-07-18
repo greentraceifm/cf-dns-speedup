@@ -448,7 +448,10 @@ validate_export_file() {
     || die "candidate export size is outside the allowed range"
   invalid_bytes="$(LC_ALL=C tr -d '\011\012\040-\176' < "$source" | wc -c | tr -d ' ')"
   [ "$invalid_bytes" -eq 0 ] || die "candidate export contains non-ASCII control data"
-  [ "$(tail -c 1 "$source" | od -An -t u1 | tr -d ' ')" = "10" ] \
+  need_cmd tail
+  need_cmd tr
+  need_cmd wc
+  [ "$(tail -c 1 "$source" | tr -d '\n' | wc -c | tr -d ' ')" = "0" ] \
     || die "candidate export must end with a newline"
   header="$(sed -n '1p' "$source")"
   [ "$header" = "$EXPECTED_HEADER" ] || die "candidate export header or schema contract is invalid"

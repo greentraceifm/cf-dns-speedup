@@ -72,6 +72,15 @@ bash "$SCRIPT" import "$TMP_DIR/empty.tsv" > "$TMP_DIR/empty.out"
 grep -q 'count=0; staging only' "$TMP_DIR/empty.out"
 [ "$(wc -l < "$STAGED")" -eq 1 ] || { echo "empty staging queue must contain only a header" >&2; exit 1; }
 
+cat > "$TMP_DIR/bin/od" <<'EOF'
+#!/usr/bin/env sh
+echo "od must not be required by the router import path" >&2
+exit 127
+EOF
+chmod +x "$TMP_DIR/bin/od"
+PATH="$TMP_DIR/bin:$PATH" bash "$SCRIPT" import "$TMP_DIR/empty.tsv" > "$TMP_DIR/no-od.out"
+grep -q 'count=0; staging only' "$TMP_DIR/no-od.out"
+
 HISTORY="$APP_DIR/router-candidate-canary-history.tsv"
 QUALIFIED="$APP_DIR/router-candidate-competition-qualified.tsv"
 printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' > "$HISTORY"

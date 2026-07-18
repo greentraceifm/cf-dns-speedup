@@ -51,6 +51,9 @@ existing real PassWall path gate before it can enter stable or control `auto`.
 - Temporary Xray JSON and logs are mode 600 in a mode 700 directory and are
   removed after the child is reaped. A stale directory causes a fail-closed
   stop rather than automatic deletion.
+- The router import path is compatible with the target BusyBox environment; it
+  uses `tail`, `tr`, and `wc` for the final-newline check and does not require
+  the optional `od` utility.
 - A project lock or an existing stale canary directory blocks execution.
 - The Sidecar export is sanitized before its directory is made readable; the
   private observation directory remains mode 700.

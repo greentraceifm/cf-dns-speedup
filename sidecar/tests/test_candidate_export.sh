@@ -3,7 +3,9 @@ set -Eeuo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+  PYTHON_BIN=python
+fi
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
