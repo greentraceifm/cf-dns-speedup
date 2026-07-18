@@ -543,7 +543,6 @@ list_candidates() {
 
 main() {
   need_cmd awk
-  need_cmd od
   need_cmd sha256sum
   case "${1:-}" in
     import) import_candidates "${2:-}" ;;
