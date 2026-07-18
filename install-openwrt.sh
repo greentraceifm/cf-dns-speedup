@@ -21,12 +21,14 @@ if [ -n "$REPO_RAW_BASE" ]; then
   curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/cf-dns-speedup.sh" "$REPO_RAW_BASE/cf-dns-speedup.sh"
   curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/config.example.env" "$REPO_RAW_BASE/config.example.env"
   curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/menu.sh" "$REPO_RAW_BASE/menu.sh"
+  curl -fL --connect-timeout 10 --max-time 60 -o "$APP_DIR/router-candidate-gate.sh" "$REPO_RAW_BASE/router-candidate-gate.sh"
 else
   echo "REPO_RAW_BASE is empty; copy cf-dns-speedup.sh and config.example.env manually." >&2
 fi
 
 chmod +x "$APP_DIR/cf-dns-speedup.sh"
 chmod +x "$APP_DIR/menu.sh"
+chmod +x "$APP_DIR/router-candidate-gate.sh"
 
 if [ ! -f "$APP_DIR/config.env" ]; then
   cp "$APP_DIR/config.example.env" "$APP_DIR/config.env"

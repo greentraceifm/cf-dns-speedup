@@ -24,6 +24,7 @@ install_files() {
   install_managed_file 0755 "$SOURCE_DIR/build-runtime-image.sh" "$INSTALL_DIR/build-runtime-image.sh"
   install_managed_file 0755 "$SOURCE_DIR/install-sidecar.sh" "$INSTALL_DIR/install-sidecar.sh"
   install_managed_file 0755 "$SOURCE_DIR/render-xray-config.py" "$INSTALL_DIR/render-xray-config.py"
+  install_managed_file 0755 "$SOURCE_DIR/export-candidates.py" "$INSTALL_DIR/export-candidates.py"
   install_managed_file 0755 "$SOURCE_DIR/router-bypass.sh" "$INSTALL_DIR/router-bypass.sh"
   install_managed_file 0644 "$SOURCE_DIR/cfip-sidecar.env.example" "$INSTALL_DIR/cfip-sidecar.env.example"
   install_managed_file 0644 "$SOURCE_DIR/cfip-sidecar.service" "$INSTALL_DIR/cfip-sidecar.service"

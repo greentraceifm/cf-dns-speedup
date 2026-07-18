@@ -19,7 +19,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/run/cfip-sidecar /var/lib/cfip-sidecar
+ReadWritePaths=/run/cfip-sidecar /var/lib/cfip-sidecar /var/lib/cfip-sidecar-export
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]

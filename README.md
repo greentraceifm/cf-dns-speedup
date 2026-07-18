@@ -183,13 +183,13 @@ cfst 总超时：3600
 
 ## 定时任务
 
-推荐每天 06:30 执行，避开 00:00/03:00 的常见规则更新任务：
+旧的 06:30 全量优选 cron 会停止或重启代理，已经永久禁用，不得恢复为无人值守任务。当前候选发现由独立 Sidecar 的 systemd timer 在约 03:30 运行；路由器 canary 仍是手动、隔离、无 PassWall 重启的动作。
 
-```cron
-30 6 * * * cd /root/cf-dns-speedup && /usr/bin/env bash ./cf-dns-speedup.sh >/tmp/cf-dns-speedup.cron.log 2>&1
+无人值守路由器配置必须保持：
+
+```text
+CFST_ALLOW_PROXY_STOP=0
 ```
-
-这个写法和旧脚本的 `cd /root/cfipopw/ && bash cdnip.sh` 思路一致：先进入脚本目录，再用 `bash` 显式执行，并把 cron 自身输出写到 `/tmp/cf-dns-speedup.cron.log`。
 
 脚本主日志仍在：
 
@@ -284,6 +284,14 @@ https://github.com/greentraceifm/cf-dns-speedup
 如果改成私有仓库，公开一键安装命令会失效，需要额外配置 GitHub 认证拉取。
 
 ## 与原项目功能对齐
+
+## 当前无停机运行方式（2026-07-18）
+
+本节覆盖前文旧的 06:30 停代理示例。无人值守的 06:30 和 15:30 停代理任务已经禁用；无人值守配置必须保持 `CFST_ALLOW_PROXY_STOP=0`。
+
+当前安全流程是：Sidecar 独立出口观察，导出通过两轮 HTTP 和硬性 6.5 MB/s 门槛的脱敏候选；路由器只写 staging 队列；先运行私有回环 Xray 的 `canary-plan`，再在明确窗口运行独立 canary。独立 canary 不停止、重启或切换现有 PassWall。
+
+候选必须有三个不同日期和三个不同 Sidecar 导出批次的通过记录，才进入竞争池。进入稳定池或更新 `auto` 之前，仍必须通过现有真实 PassWall 6.5 MB/s 门控。直连或 Sidecar 速度高，不能单独触发 DNS 更新。
 
 保留：
 

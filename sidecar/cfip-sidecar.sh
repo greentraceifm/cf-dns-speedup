@@ -15,6 +15,7 @@ SIDECAR_NETWORK="${SIDECAR_NETWORK:-cfip-direct}"
 SIDECAR_RUNTIME_IMAGE="${SIDECAR_RUNTIME_IMAGE:-cfip-sidecar-runtime:20260714}"
 SIDECAR_ASSET_DIR="${SIDECAR_ASSET_DIR:-/opt/cfip-sidecar/assets}"
 SIDECAR_DATA_DIR="${SIDECAR_DATA_DIR:-/var/lib/cfip-sidecar}"
+SIDECAR_EXPORT_DIR="${SIDECAR_EXPORT_DIR:-/var/lib/cfip-sidecar-export}"
 SIDECAR_RUN_DIR="${SIDECAR_RUN_DIR:-/run/cfip-sidecar}"
 SIDECAR_REQUIRED_CONTAINERS="${SIDECAR_REQUIRED_CONTAINERS:-k12-reg sub2api sub2api-postgres sub2api-redis}"
 
@@ -60,6 +61,7 @@ CURL_BIN="${CURL_BIN:-curl}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 LOCK_FILE="$SIDECAR_RUN_DIR/sidecar.lock"
 LOG_FILE="$SIDECAR_DATA_DIR/sidecar.log"
+EXPORT_FILE="$SIDECAR_EXPORT_DIR/candidates.latest.tsv"
 ACTIVE_CONTAINERS=""
 
 log() {
@@ -86,9 +88,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 prepare_dirs() {
-  mkdir -p "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
+  mkdir -p "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR/observations" \
+    "$SIDECAR_DATA_DIR/diagnostics" "$SIDECAR_EXPORT_DIR"
   chmod 700 "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR" \
     "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
+  chmod 755 "$SIDECAR_EXPORT_DIR"
+}
+
+export_candidates() {
+  local report="$1" result
+  result="$(
+    "$PYTHON_BIN" "$SCRIPT_DIR/export-candidates.py" \
+      --source "$report" --destination "$EXPORT_FILE" --min-mbps 6.5
+  )" || die "candidate export failed; previous export was preserved"
+  log "candidate export complete: $result; destination=$EXPORT_FILE"
 }
 
 acquire_lock() {
@@ -459,6 +472,7 @@ observe() {
   done <"$candidates"
   cp "$report" "$SIDECAR_DATA_DIR/sidecar-observation.latest.tsv"
   cp "$direct" "$SIDECAR_DATA_DIR/direct.latest.csv"
+  export_candidates "$report"
   find "$SIDECAR_DATA_DIR/observations" -type f -mtime +30 -delete 2>/dev/null || true
   log "observation complete: report=$report; no DNS or champion-pool update was attempted"
 }
