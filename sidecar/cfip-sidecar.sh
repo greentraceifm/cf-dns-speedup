@@ -63,6 +63,7 @@ LOCK_FILE="$SIDECAR_RUN_DIR/sidecar.lock"
 LOG_FILE="$SIDECAR_DATA_DIR/sidecar.log"
 EXPORT_FILE="$SIDECAR_EXPORT_DIR/candidates.latest.tsv"
 ACTIVE_CONTAINERS=""
+ACTIVE_CONFIGS=()
 
 log() {
   mkdir -p "$SIDECAR_DATA_DIR"
@@ -79,11 +80,15 @@ need_cmd() {
 }
 
 cleanup() {
-  local name
+  local name config
   for name in $ACTIVE_CONTAINERS; do
     "$DOCKER_BIN" rm -f "$name" >/dev/null 2>&1 || true
   done
-  find "$SIDECAR_RUN_DIR" -maxdepth 1 -type f -name 'xray-*.json' -delete 2>/dev/null || true
+  for config in "${ACTIVE_CONFIGS[@]}"; do
+    case "$config" in
+      "$SIDECAR_RUN_DIR"/xray-*.json) rm -f -- "$config" || true ;;
+    esac
+  done
 }
 trap cleanup EXIT INT TERM
 
@@ -93,6 +98,12 @@ prepare_dirs() {
   chmod 700 "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR" \
     "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
   chmod 755 "$SIDECAR_EXPORT_DIR"
+}
+
+assert_no_xray_residue() {
+  local residue
+  residue="$(find "$SIDECAR_RUN_DIR" -mindepth 1 -maxdepth 1 -name 'xray-*.json' -print -quit 2>/dev/null || true)"
+  [ -z "$residue" ] || die "unexpected Xray config residue: $residue"
 }
 
 export_candidates() {
@@ -126,6 +137,7 @@ container_is_healthy() {
 
 gate_check() {
   local load1 available_mb disk_mb name
+  assert_no_xray_residue
   "$DOCKER_BIN" info >/dev/null 2>&1 || die "Docker is unavailable"
   ollama_is_idle || die "Ollama has a resident model; sidecar yields"
   load1="$(awk '{print $1}' /proc/loadavg)"
@@ -300,6 +312,10 @@ start_xray() {
     candidate) target_args=(--candidate "$candidate") ;;
     profile) target_args=(--preserve-address) ;;
     *) die "unsupported Xray target mode: $target_mode" ;;
+  esac
+  case "$config" in
+    "$SIDECAR_RUN_DIR"/xray-*.json) ACTIVE_CONFIGS+=("$config") ;;
+    *) die "Xray config path is outside Sidecar run directory: $config" ;;
   esac
   "$PYTHON_BIN" "$SCRIPT_DIR/render-xray-config.py" \
     --source "$CREDENTIAL_SOURCE" "${target_args[@]}" --output "$config"
