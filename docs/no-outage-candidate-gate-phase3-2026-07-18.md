@@ -103,3 +103,54 @@ The no-outage discovery and isolated validation path is ready for staged
 deployment after expert review. The project is not yet at the final DNS
 promotion state because the measured real PassWall candidate set is empty.
 That is an evidence gate, not a software failure.
+
+## Production Deployment Closeout
+
+Deployment completed on 2026-07-18 at approximately 23:45 CST from GitHub
+`main` commit `1b97368`.
+
+Router staging gate:
+
+- Installed `/root/cf-dns-speedup/router-candidate-gate.sh` with SHA256
+  `dc905a815047767dde9ff53791550f10e799b934b189343dbe53f61bc24c94e0`.
+- Backup: `/root/openwrt-backup/cfip-phase3-router-gate-1b97368.idcaPJ`.
+- The initial staging queue contains only the schema header (one line).
+- Target BusyBox dry-runs caught and fixed an optional `od` dependency and a
+  Windows CRLF packaging error before production installation.
+- A strict post-check rollback was exercised at
+  `/root/openwrt-backup/cfip-phase3-router-gate-1b97368.AgLpOp`; it preserved
+  the original PassWall state. The final deployment then passed every gate.
+
+Sidecar exporter:
+
+- Installed the six-file export implementation and its systemd/tmpfiles
+  mappings on `192.168.1.110`.
+- Backup: `/var/backups/cfip-sidecar/phase3-candidate-export-1b97368.qu6AXl`.
+- A first attempt rolled back safely at
+  `/var/backups/cfip-sidecar/phase3-candidate-export-1b97368.5uUcFl` because an
+  exact randomized timer timestamp was treated as immutable. Final acceptance
+  verifies the documented 03:30-03:36 timer window instead.
+- The service was not started. Its previous start timestamp remains
+  `2026-07-17 19:32:59 UTC`, and the next natural timer is approximately
+  `2026-07-19 03:33 Asia/Shanghai`.
+- The real `/etc/cfip-sidecar/sidecar.env` hash remained unchanged. The new
+  export directory is empty, root-owned, and mode 0755; the private observation
+  directory remains mode 0700.
+
+Post-deployment verification:
+
+- PassWall Xray PIDs remained `18923 18010`; ports 1070, 1041, 11400, and
+  15353 remained listening.
+- PassWall UCI and runtime JSON hashes remained unchanged.
+- Docker PID remained 997; all four existing containers stayed healthy;
+  `cfip-direct` had zero attached containers; Ollama had no resident model.
+- PC, OpenClaw, router, and Sidecar Google/YouTube probes returned HTTP 204.
+- `auto` through `auto4` matched across `192.168.1.1`, `192.168.1.254`, and
+  `1.1.1.1`. Cloudflare API was not rechecked.
+- No canary, PassWall restart/stop, DNS update, pool promotion, firewall,
+  route, subscription, credential, cron, or timer topology change occurred.
+
+The next gate is the first natural Sidecar run with the deployed exporter. A
+header-only export keeps the router queue empty. Any exported row must still
+pass three distinct isolated-router canary days and the existing real PassWall
+path threshold of 6.5 MB/s before a DNS promotion can be considered.
