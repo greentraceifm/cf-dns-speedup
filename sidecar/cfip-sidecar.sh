@@ -94,9 +94,13 @@ trap cleanup EXIT INT TERM
 
 prepare_dirs() {
   mkdir -p "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR/observations" \
-    "$SIDECAR_DATA_DIR/diagnostics" "$SIDECAR_EXPORT_DIR"
+    "$SIDECAR_DATA_DIR/diagnostics"
   chmod 700 "$SIDECAR_RUN_DIR" "$SIDECAR_DATA_DIR" \
     "$SIDECAR_DATA_DIR/observations" "$SIDECAR_DATA_DIR/diagnostics"
+}
+
+prepare_export_dir() {
+  mkdir -p "$SIDECAR_EXPORT_DIR"
   chmod 755 "$SIDECAR_EXPORT_DIR"
 }
 
@@ -108,6 +112,7 @@ assert_no_xray_residue() {
 
 export_candidates() {
   local report="$1" result
+  prepare_export_dir
   result="$(
     "$PYTHON_BIN" "$SCRIPT_DIR/export-candidates.py" \
       --source "$report" --destination "$EXPORT_FILE" --min-mbps 6.5

@@ -34,13 +34,15 @@ cat > "$BIN/fake-xray" <<'EOF'
 if [ "${2:-}" = "-test" ]; then exit 0; fi
 exit 0
 EOF
+chmod +x "$BIN"/*
 printf 'config passwall\n' > "$TMP_DIR/passwall"
 printf '{"outbounds":[{"protocol":"vmess","tag":"proxy","settings":{"address":"104.17.1.10"}}]}\n' > "$TMP_DIR/runtime.json"
 NOW="$(date +%s)"
+OBSERVED_AT="$(date '+%F %T')"
 HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
 {
   printf '%s\n' "$HEADER"
-  printf 'cfip-sidecar-candidates-v1\t%s\t2026-07-18 03:30:00\t104.17.1.10\t9.00\t6.80\t6.70\t6.70\t6.75\t200\t200\tpass\tsidecar_proxy\n' "$NOW"
+  printf 'cfip-sidecar-candidates-v1\t%s\t%s\t104.17.1.10\t9.00\t6.80\t6.70\t6.70\t6.75\t200\t200\tpass\tsidecar_proxy\n' "$NOW" "$OBSERVED_AT"
 } > "$TMP_DIR/export.tsv"
 
 sleep 60 &

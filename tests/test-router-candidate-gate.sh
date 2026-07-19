@@ -18,14 +18,15 @@ export CONFIG_FILE="$TMP_DIR/missing.env"
 export CFIP_CANDIDATE_GATE_LOCK="$TMP_DIR/gate.lock"
 HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
 NOW="$(date +%s)"
+OBSERVED_AT="$(date '+%F %T')"
 VALID="$TMP_DIR/valid.tsv"
 
 write_row() {
   local output="$1" epoch="$2" ip="$3" r1="$4" r2="$5" minimum="$6" average="$7"
   {
     printf '%s\n' "$HEADER"
-    printf 'cfip-sidecar-candidates-v1\t%s\t2026-07-18 03:30:00\t%s\t9.00\t%s\t%s\t%s\t%s\t200\t200\tpass\tsidecar_proxy\n' \
-      "$epoch" "$ip" "$r1" "$r2" "$minimum" "$average"
+    printf 'cfip-sidecar-candidates-v1\t%s\t%s\t%s\t9.00\t%s\t%s\t%s\t%s\t200\t200\tpass\tsidecar_proxy\n' \
+      "$epoch" "$OBSERVED_AT" "$ip" "$r1" "$r2" "$minimum" "$average"
   } > "$output"
 }
 
