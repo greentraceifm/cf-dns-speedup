@@ -203,3 +203,75 @@ candidate-address override. Because the target-address difference is large
 but the scenarios were serial, repeat the same bounded diagnostic on one more
 quiet night before declaring the upstream profile/server/ISP path the final
 bottleneck. Do not expand the normal IP scan or lower the 6.5 MB/s gate.
+
+## Replication Diagnostic Result - 2026-07-21
+
+The next natural observation completed successfully before the replication
+attempt. Its five candidates all returned HTTP 200, with Sidecar minima from
+4.23 to 5.17 MB/s. None reached the unchanged 6.5 MB/s production gate.
+
+The first review found one Ollama model resident, so the hard gate stopped the
+diagnostic before it was started. No model or service was stopped. After the
+model unloaded naturally, every pre-run gate was repeated and passed: load was
+0.09, Docker PID remained 997, all four existing containers were healthy, the
+Sidecar lock was free, there were no runtime Xray JSON files or transient
+containers, and `cfip-direct` had zero attachments. PassWall had two Xray
+processes and listeners 1070, 1041, 11400, and 15353. PC, OpenClaw, router, and
+Sidecar HTTP probes returned 204, and all five records matched across
+`192.168.1.1`, `192.168.1.254`, and `1.1.1.1`. Cloudflare API was not rechecked.
+
+The single authorized replication ran from 23:29:21 to 23:30:25 CST. Report:
+
+```text
+/var/lib/cfip-sidecar/diagnostics/sidecar-diagnostic-20260721-152933.tsv
+```
+
+It contains exactly four complete scenarios, each with two successful rounds:
+
+| Scenario | Round 1 | Round 2 | Minimum | Average | HTTP | Bytes per round | Status |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| `candidate_baseline` | 3.72 | 4.04 | 3.72 | 3.88 | 200/200 | 20,971,520 | low |
+| `candidate_relaxed` | 4.24 | 4.14 | 4.14 | 4.19 | 200/200 | 20,971,520 | low |
+| `profile_relaxed` | 1.98 | 4.20 | 1.98 | 3.09 | 200/200 | 20,971,520 | low |
+| `candidate_alt` | 3.93 | 3.61 | 3.61 | 3.77 | 200/200 | 20,000,000 | low |
+
+Replication effects, using the predeclared average-speed criteria:
+
+- CPU effect: `candidate_relaxed` was 8.0% above baseline, within the 20%
+  no-material-effect band. Extra CPU again did not explain the limit.
+- Target-address effect: `profile_relaxed` averaged 73.7% of
+  `candidate_relaxed`, just outside the replication requirement of at most
+  70%. The strict average criterion therefore did not reproduce. Its minimum
+  was still 52.2% lower, showing a large but temporally unstable target-path
+  penalty.
+- Endpoint effect: `candidate_alt` averaged 10.0% below
+  `candidate_relaxed`, within the 20% no-material-effect band. Endpoint choice
+  again did not explain the limit.
+
+All scenarios remained below 6.5 MB/s. The run did not scan IP ranges, export
+or promote a candidate, update DNS or Cloudflare, change a pool, or stop,
+restart, switch, or reconfigure PassWall. Post-run checks again passed for the
+Sidecar unit and timer, locks and transient cleanup, Docker PID and container
+health, Ollama idle state, PassWall processes and listeners, four-host HTTP,
+and five-record three-view DNS consistency.
+
+## Phase 2 Closeout Decision
+
+The second night confirms that increasing local CPU and changing the download
+endpoint are not useful optimization directions. It does not strictly confirm
+the first night's target-address effect because one profile round recovered to
+4.20 MB/s and raised the average above the 70% replication cutoff. The target
+address remains a plausible variable, but its effect is not stable enough to
+justify a production policy change.
+
+Keep the current CPU limits, primary endpoint, candidate override, normal scan
+size, and real PassWall 6.5 MB/s gate. Do not promote any observed candidate
+and do not expand Cloudflare IP discovery. The persistent sub-6.5 MB/s tunnel
+envelope makes the upstream profile, server capacity, or ISP tunnel path the
+leading next investigation area, but that requires a separately reviewed
+profile or node-capacity experiment. It is outside this diagnostic phase and
+must not modify subscriptions or credentials automatically.
+
+Closeout repository verification passed on OpenClaw: all Sidecar tests and all
+full-project regression groups passed, and the documentation patch passed
+`git diff --check`. The test staging directory and archive were removed.
