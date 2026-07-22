@@ -205,6 +205,10 @@ CFST_ALLOW_PROXY_STOP=0
 
 - Sidecar 地址必须在 PassWall 中配置为精确的直连旁路；禁止复用受代理 ACL 控制的主机地址。
 - 运行前检查 Ollama 空闲、系统负载、可用内存、磁盘和既有容器健康状态。
+- 现有 `cfip-direct` 必须是 `ipvlan L2`，并匹配 parent、subnet 和 gateway；镜像 tag 必须匹配构建时记录的 image ID。
+- Sidecar 与宿主清理任务使用独立锁互斥；清理运行中 Sidecar 会在任何测速前安全让步。
+- 宿主清理只能清理旧 stopped container、dangling image 和有超时上限的 BuildKit cache，不得运行 host-wide `docker system prune -a` 或 network prune。
+- `status` 必须同时查看 `service_result`、`service_exec_status` 和报告时间；systemd reset-failed 后的 `Result=success` 不能覆盖真实非零退出码。
 - Xray 明文配置只通过 systemd encrypted credential 解密到 `/run`。
 - Sidecar 报告只进入观察流程，不更新 Cloudflare DNS，也不直接进入稳定冠军池。
 - `sidecar/router-bypass.sh` 只做 UCI 持久配置和增量 nft 规则，不 reload 或 restart PassWall。

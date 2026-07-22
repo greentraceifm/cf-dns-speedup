@@ -25,5 +25,7 @@ grep -Fq 'preserved_network_ids=' "$POLICY"
 grep -Fq 'preserved_tagged_image_ids=' "$POLICY"
 grep -Fq 'docker network inspect "$resource_id"' "$POLICY"
 grep -Fq 'docker image inspect "$resource_id"' "$POLICY"
+grep -Fq -- '--connect-timeout 5 --max-time "$BUILDKIT_PRUNE_MAX_SECONDS"' "$POLICY"
+grep -Fq 'invalid BUILDKIT_PRUNE_MAX_SECONDS' "$POLICY"
 
 echo "host cleanup policy test passed"

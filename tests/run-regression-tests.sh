@@ -1,5 +1,6 @@
-#!/usr/bin/env sh
-set -eu
+#!/usr/bin/env bash
+set -Eeuo pipefail
+exec </dev/null
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SCRIPT="$ROOT_DIR/cf-dns-speedup.sh"
@@ -21,6 +22,8 @@ pass() {
 }
 
 mkdir -p "$TMP_DIR"
+
+sh "$ROOT_DIR/tests/test_operational_hardening.sh"
 
 MAIN_LINE="$(grep -n '^main ' "$SCRIPT" | tail -n 1 | cut -d: -f1)"
 [ -n "$MAIN_LINE" ] || fail "cannot find main entrypoint"

@@ -8,6 +8,7 @@ flock -n 9 || exit 0
 DEPLOY_DIR=/opt/sub2api-deploy
 BACKUP_DIR="$DEPLOY_DIR/backups"
 LOG_DIR="$DEPLOY_DIR/data/logs"
+BUILDKIT_PRUNE_MAX_SECONDS="${BUILDKIT_PRUNE_MAX_SECONDS:-300}"
 
 echo "cleanup_started=$(date -Is)"
 df -h /
@@ -39,7 +40,11 @@ done
 # plugin. Prune that cache through the official Engine API with the same age
 # boundary; this never touches images, containers, or volumes.
 docker_api="$(docker version --format '{{.Server.APIVersion}}')"
-curl -fsS --unix-socket /var/run/docker.sock -X POST \
+case "$BUILDKIT_PRUNE_MAX_SECONDS" in
+  ''|*[!0-9]*|0) echo "invalid BUILDKIT_PRUNE_MAX_SECONDS" >&2; exit 1 ;;
+esac
+curl -fsS --connect-timeout 5 --max-time "$BUILDKIT_PRUNE_MAX_SECONDS" \
+  --unix-socket /var/run/docker.sock -X POST \
   "http://localhost/v${docker_api}/build/prune?all=1&filters=%7B%22until%22%3A%7B%22168h%22%3Atrue%7D%7D"
 echo
 

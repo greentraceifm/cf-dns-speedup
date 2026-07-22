@@ -18,6 +18,8 @@ SIDECAR_DATA_DIR="${SIDECAR_DATA_DIR:-/var/lib/cfip-sidecar}"
 SIDECAR_EXPORT_DIR="${SIDECAR_EXPORT_DIR:-/var/lib/cfip-sidecar-export}"
 SIDECAR_RUN_DIR="${SIDECAR_RUN_DIR:-/run/cfip-sidecar}"
 SIDECAR_REQUIRED_CONTAINERS="${SIDECAR_REQUIRED_CONTAINERS:-k12-reg sub2api sub2api-postgres sub2api-redis}"
+SIDECAR_RUNTIME_IMAGE_ID_FILE="${SIDECAR_RUNTIME_IMAGE_ID_FILE:-$SIDECAR_DATA_DIR/runtime-image.id}"
+SIDECAR_HOST_MAINTENANCE_LOCKS="${SIDECAR_HOST_MAINTENANCE_LOCKS:-/run/lock/sub2api-auto-cleanup.lock /run/lock/sub2api-auto-cleanup-service.lock}"
 
 SIDECAR_MAX_LOAD1="${SIDECAR_MAX_LOAD1:-1.0}"
 SIDECAR_MIN_AVAILABLE_MB="${SIDECAR_MIN_AVAILABLE_MB:-4096}"
@@ -110,6 +112,21 @@ assert_no_xray_residue() {
   [ -z "$residue" ] || die "unexpected Xray config residue: $residue"
 }
 
+assert_host_maintenance_idle() {
+  local lock maintenance_fd
+  for lock in $SIDECAR_HOST_MAINTENANCE_LOCKS; do
+    [ -e "$lock" ] || continue
+    exec {maintenance_fd}<"$lock" \
+      || die "cannot inspect host maintenance lock: $lock"
+    if ! flock -n "$maintenance_fd"; then
+      exec {maintenance_fd}<&-
+      die "host maintenance lock is held; sidecar yields: $lock"
+    fi
+    flock -u "$maintenance_fd"
+    exec {maintenance_fd}<&-
+  done
+}
+
 export_candidates() {
   local report="$1" result
   prepare_export_dir
@@ -143,6 +160,7 @@ container_is_healthy() {
 gate_check() {
   local load1 available_mb disk_mb name
   assert_no_xray_residue
+  assert_host_maintenance_idle
   "$DOCKER_BIN" info >/dev/null 2>&1 || die "Docker is unavailable"
   ollama_is_idle || die "Ollama has a resident model; sidecar yields"
   load1="$(awk '{print $1}' /proc/loadavg)"
@@ -170,6 +188,7 @@ name,subnet,gateway,parent=sys.argv[1:]
 data=json.load(sys.stdin)[0]
 configs=data.get("IPAM",{}).get("Config",[])
 ok=(data.get("Driver")=="ipvlan" and data.get("Options",{}).get("parent")==parent
+    and data.get("Options",{}).get("ipvlan_mode")=="l2"
     and any(c.get("Subnet")==subnet and c.get("Gateway")==gateway for c in configs))
 raise SystemExit(0 if ok else 1)
 ' "$SIDECAR_NETWORK" "$SIDECAR_SUBNET" "$SIDECAR_GATEWAY" "$SIDECAR_PARENT_IF"
@@ -187,8 +206,16 @@ network_ensure() {
 }
 
 image_check() {
-  "$DOCKER_BIN" image inspect "$SIDECAR_RUNTIME_IMAGE" >/dev/null 2>&1 \
-    || die "runtime image is missing: $SIDECAR_RUNTIME_IMAGE"
+  local current_id expected_id
+  current_id="$("$DOCKER_BIN" image inspect --format '{{.Id}}' "$SIDECAR_RUNTIME_IMAGE" 2>/dev/null || true)"
+  [ -n "$current_id" ] || die "runtime image is missing: $SIDECAR_RUNTIME_IMAGE"
+  [ -s "$SIDECAR_RUNTIME_IMAGE_ID_FILE" ] \
+    || die "runtime image identity file is missing: $SIDECAR_RUNTIME_IMAGE_ID_FILE"
+  expected_id="$(sed -n '1{s/[[:space:]]//g;p;}' "$SIDECAR_RUNTIME_IMAGE_ID_FILE")"
+  printf '%s\n' "$expected_id" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+    || die "runtime image identity file is invalid"
+  [ "$current_id" = "$expected_id" ] \
+    || die "runtime image identity does not match the recorded build"
   [ -x "$SIDECAR_ASSET_DIR/cfst" ] || die "cfst asset is missing"
   [ -s "$SIDECAR_ASSET_DIR/ip.txt" ] || die "ip.txt asset is missing"
 }
@@ -201,14 +228,17 @@ docker_security_args() {
 extract_public_ip() {
   local response="$1" ip
   ip="$(printf '%s\n' "$response" | awk -F= '$1 == "ip" {print $2; exit}')"
-  if [ -n "$ip" ]; then
-    printf '%s\n' "$ip"
-  else
-    printf '%s\n' "$response" | tr -d '[:space:]'
-  fi
+  [ -n "$ip" ] || ip="$(printf '%s\n' "$response" | tr -d '[:space:]')"
+  "$PYTHON_BIN" -c \
+    'import ipaddress,sys; print(ipaddress.ip_address(sys.argv[1]))' \
+    "$ip" 2>/dev/null || true
 }
 
 validate_path_probe_settings() {
+  case "$SIDECAR_PATH_CHECK_URL" in
+    https://*) ;;
+    *) die "SIDECAR_PATH_CHECK_URL must use HTTPS" ;;
+  esac
   case "$SIDECAR_PATH_CHECK_ATTEMPTS" in
     ''|*[!0-9]*|0) die "SIDECAR_PATH_CHECK_ATTEMPTS must be a positive integer" ;;
   esac
@@ -518,10 +548,18 @@ canary() {
 status() {
   prepare_dirs
   printf 'network='; if network_check >/dev/null 2>&1; then echo ok; else echo missing_or_invalid; fi
-  printf 'image='; if "$DOCKER_BIN" image inspect "$SIDECAR_RUNTIME_IMAGE" >/dev/null 2>&1; then echo ok; else echo missing; fi
+  printf 'image='; if image_check >/dev/null 2>&1; then echo ok; else echo missing_or_mismatched; fi
   printf 'timer='; systemctl is-enabled cfip-sidecar.timer 2>/dev/null || true
   printf 'service='; systemctl is-active cfip-sidecar.service 2>/dev/null || true
+  printf 'service_result='; systemctl show cfip-sidecar.service -p Result --value 2>/dev/null || true
+  printf 'service_exec_status='; systemctl show cfip-sidecar.service -p ExecMainStatus --value 2>/dev/null || true
   printf 'latest_report='; [ -s "$SIDECAR_DATA_DIR/sidecar-observation.latest.tsv" ] && echo present || echo absent
+  printf 'latest_report_epoch='
+  if [ -s "$SIDECAR_DATA_DIR/sidecar-observation.latest.tsv" ]; then
+    stat -c '%Y' "$SIDECAR_DATA_DIR/sidecar-observation.latest.tsv"
+  else
+    echo absent
+  fi
   printf 'latest_diagnostic='; [ -s "$SIDECAR_DATA_DIR/sidecar-diagnostic.latest.tsv" ] && echo present || echo absent
 }
 

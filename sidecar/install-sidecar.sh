@@ -32,6 +32,8 @@ install_files() {
   install_managed_file 0644 "$SOURCE_DIR/cfip-sidecar.timer" "$INSTALL_DIR/cfip-sidecar.timer"
   install_managed_file 0644 "$SOURCE_DIR/cfip-sidecar.tmpfiles" "$INSTALL_DIR/cfip-sidecar.tmpfiles"
   [ -e "$CONFIG_DIR/sidecar.env" ] || install -m 0600 "$INSTALL_DIR/cfip-sidecar.env.example" "$CONFIG_DIR/sidecar.env"
+  [ -f "$CONFIG_DIR/sidecar.env" ] || { echo "invalid Sidecar config path" >&2; exit 1; }
+  chmod 0600 "$CONFIG_DIR/sidecar.env"
   install_managed_file 0644 "$INSTALL_DIR/cfip-sidecar.service" "$SYSTEMD_DIR/cfip-sidecar.service"
   install_managed_file 0644 "$INSTALL_DIR/cfip-sidecar-diagnose@.service" "$SYSTEMD_DIR/cfip-sidecar-diagnose@.service"
   install_managed_file 0644 "$INSTALL_DIR/cfip-sidecar.timer" "$SYSTEMD_DIR/cfip-sidecar.timer"

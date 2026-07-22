@@ -32,8 +32,8 @@ chmod +x "$APP_DIR/router-candidate-gate.sh"
 
 if [ ! -f "$APP_DIR/config.env" ]; then
   cp "$APP_DIR/config.example.env" "$APP_DIR/config.env"
-  chmod 600 "$APP_DIR/config.env"
 fi
+chmod 600 "$APP_DIR/config.env"
 
 echo "Installed to $APP_DIR"
 echo "Opening setup menu..."

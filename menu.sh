@@ -10,8 +10,8 @@ ensure_config() {
   mkdir -p "$APP_DIR"
   if [ ! -f "$CONFIG_FILE" ]; then
     cp "$APP_DIR/config.example.env" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
   fi
+  chmod 600 "$CONFIG_FILE"
 }
 
 get_value() {

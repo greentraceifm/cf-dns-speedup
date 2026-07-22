@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
 set -eu
+umask 077
 
 APP_DIR="${APP_DIR:-/root/cf-dns-speedup}"
 LOCK_DIR="${CFST_PASSWALL_NODE_OBSERVE_LOCK:-/tmp/cf-dns-speedup-passwall-node-observe.lock}"
@@ -8,6 +9,21 @@ REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.lates
 TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
 HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
 LOG_FILE="${PASSWALL_NODE_OBSERVE_LOG:-$APP_DIR/passwall-node-observe.log}"
+LOG_MAX_KB="${PASSWALL_NODE_OBSERVE_LOG_MAX_KB:-1024}"
+
+rotate_log_if_needed() {
+  local size max_bytes
+  case "$LOG_MAX_KB" in
+    ''|*[!0-9]*|0) LOG_MAX_KB=1024 ;;
+  esac
+  [ -f "$LOG_FILE" ] || return 0
+  size="$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)"
+  max_bytes=$((LOG_MAX_KB * 1024))
+  [ "$size" -lt "$max_bytes" ] 2>/dev/null || mv -f "$LOG_FILE" "$LOG_FILE.1"
+}
+
+mkdir -p "$APP_DIR"
+rotate_log_if_needed
 
 log() {
   mkdir -p "$APP_DIR"

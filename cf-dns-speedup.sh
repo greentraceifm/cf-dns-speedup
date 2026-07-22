@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 APP_DIR="${APP_DIR:-/root/cf-dns-speedup}"
 CONFIG_FILE="${CONFIG_FILE:-$APP_DIR/config.env}"
@@ -77,9 +78,14 @@ need_cmd() {
 }
 
 load_config() {
-  [ -f "$CONFIG_FILE" ] || die "配置文件不存在：$CONFIG_FILE"
+  local config_path
+  config_path="$CONFIG_FILE"
+  [ -f "$config_path" ] || die "配置文件不存在：$config_path"
+  chmod 600 "$config_path" || die "无法收紧配置文件权限：$config_path"
   # shellcheck disable=SC1090
-  . "$CONFIG_FILE"
+  . "$config_path"
+  CONFIG_FILE="$config_path"
+  chmod 600 "$CONFIG_FILE" || die "无法保持配置文件权限：$CONFIG_FILE"
 
   PUSH_MODE="${PUSH_MODE:-domain}"
   DOMAIN_UPDATE_MODE="${DOMAIN_UPDATE_MODE:-multi}"
@@ -236,6 +242,7 @@ load_config() {
   # Stopping the active proxy is an explicit maintenance-window action.
   # Unattended runs must fail closed instead of interrupting user traffic.
   CFST_ALLOW_PROXY_STOP="${CFST_ALLOW_PROXY_STOP:-0}"
+  CFST_PASSWALL_HEALTH_PORTS="${CFST_PASSWALL_HEALTH_PORTS:-1070 1041 11400 15353}"
   PROXY_RESTART_WAIT="${PROXY_RESTART_WAIT:-30}"
   TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
   TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-}"
@@ -3407,7 +3414,28 @@ delete_records_command() {
 }
 
 print_service_health() {
-  /etc/init.d/passwall enabled >/dev/null 2>&1 && echo "passwall_enabled=yes" || echo "passwall_enabled=no"
+  local enabled=no xray_processes=0 port listeners_ok=yes
+  if /etc/init.d/passwall enabled >/dev/null 2>&1; then
+    enabled=yes
+  fi
+  if command -v pidof >/dev/null 2>&1; then
+    xray_processes="$(pidof xray 2>/dev/null | awk '{print NF}')"
+  fi
+  echo "passwall_enabled=$enabled"
+  echo "passwall_xray_processes=$xray_processes"
+  for port in $CFST_PASSWALL_HEALTH_PORTS; do
+    if netstat -ln 2>/dev/null | awk -v suffix=":$port" '$4 ~ (suffix "$") {found=1} END {exit found ? 0 : 1}'; then
+      echo "passwall_listener_${port}=yes"
+    else
+      echo "passwall_listener_${port}=no"
+      listeners_ok=no
+    fi
+  done
+  if [ "$enabled" = yes ] && [ "$xray_processes" -gt 0 ] 2>/dev/null && [ "$listeners_ok" = yes ]; then
+    echo "passwall_runtime_healthy=yes"
+  else
+    echo "passwall_runtime_healthy=no"
+  fi
   /etc/init.d/smartdns status 2>/dev/null || true
   /etc/init.d/dnsmasq status 2>/dev/null || true
   /etc/init.d/firewall status 2>/dev/null || true
@@ -3806,6 +3834,7 @@ validate_current_command() {
 
 observe_current_command() {
   acquire_lock
+  rotate_logs
   local ts
   ts="$(date '+%F %T')"
 
@@ -3880,7 +3909,7 @@ observe_current_command() {
 install_observe_cron_command() {
   local schedule line tmp
   schedule="$CFST_OBSERVE_CRON"
-  line="$schedule cd $APP_DIR && /usr/bin/env bash ./cf-dns-speedup.sh observe-current >>/tmp/cf-dns-speedup.observe.log 2>&1"
+  line="$schedule cd $APP_DIR && /usr/bin/env bash ./cf-dns-speedup.sh observe-current >/tmp/cf-dns-speedup.observe.log 2>&1"
   tmp="/tmp/cf-dns-speedup-cron.$$"
   crontab -l 2>/dev/null | grep -v 'cf-dns-speedup.sh observe-current' > "$tmp" || true
   printf '%s\n' "$line" >> "$tmp"
