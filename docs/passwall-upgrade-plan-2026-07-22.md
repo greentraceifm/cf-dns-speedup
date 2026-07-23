@@ -160,3 +160,38 @@ shared requirements. Installation remains blocked until the fresh natural
 Sidecar acceptance, a newer signed-index-backed candidate, and the exact
 verified rollback IPK are all available in the same observed maintenance
 window.
+
+## 2026-07-23 observed gate result
+
+The post-hardening natural Sidecar gate passed. The service returned to
+`inactive` with `Result=success`, `ExecMainStatus=0`, and no MainPID. The new
+report `sidecar-observation-20260722-193225.tsv` contained five complete
+candidates, all with HTTP 200. Their minimum measured rates were between
+`4.19` and `4.41 MB/s`, so none met the unchanged real PassWall
+`6.5 MB/s` promotion gate. Sidecar locks and cleanup checks passed; Docker,
+the four existing containers, Ollama, host connectivity, PassWall processes
+and listeners, and the three DNS views remained healthy. The Cloudflare API
+was not rechecked.
+
+A subsequent observed `opkg update` completed successfully for all seven
+configured feeds. The refreshed `kwrt_kiddin9` package index advertises
+`xray-core 26.7.11-r20` for `x86_64`, size `12315847`, SHA256
+`ac1fcbfaafbf01c40d05767ecf1eb40aff33900130c438f88ea9fdc64a243d80`,
+with only `libc` and `ca-bundle` dependencies. Those fields exactly match the
+already staged candidate IPK.
+
+Installation is nevertheless blocked by two mandatory controls:
+
+- the configured feed does not provide `Packages.sig`, and the router has no
+  enabled `check_signature` option, so the package index cannot be verified
+  with the existing trusted keys;
+- the exact installed rollback package, `xray-core 26.6.1-r13` for `x86_64`,
+  is not present in the router staging or backup locations and is not
+  available from the current package indexes with a verifiable provenance
+  chain.
+
+The state therefore remains `deferred_no_validated_target`. No package was
+installed, PassWall was not restarted, and no runtime configuration, DNS,
+route, pool, subscription, timer, or Cloudflare record was changed. A future
+attempt may resume only after both a signed target-index chain and the exact
+verified rollback IPK are available in the same controlled window.
