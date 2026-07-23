@@ -212,3 +212,18 @@ confirmed two `/usr/bin/xray` processes and listeners `1070`, `1041`, `11400`,
 and `15353`. The earlier zero result was a probe compatibility error because
 this router does not provide `ss`; it was not a PassWall outage. No install,
 restart, feed change, key change, or runtime modification was performed.
+
+### Upstream artifact request
+
+The `kiddin9/Kwrt` repository has issues disabled, so a single no-secret
+request was opened in the active package repository:
+
+`https://github.com/kiddin9/op-packages/issues/5`
+
+The request asks for a signed `Packages` index, the official trusted-key
+location, and an archived exact `xray-core_26.6.1-r13_x86_64.ipk` referenced by
+a historical signed index. Production remains unchanged while the issue is
+open. Any upstream response must still be independently verified against the
+published key, package metadata, size, and SHA256 before preflight may resume;
+a reply or third-party attachment alone is not sufficient authorization to
+install.
