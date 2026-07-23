@@ -195,3 +195,20 @@ installed, PassWall was not restarted, and no runtime configuration, DNS,
 route, pool, subscription, timer, or Cloudflare record was changed. A future
 attempt may resume only after both a signed target-index chain and the exact
 verified rollback IPK are available in the same controlled window.
+
+### Same-day unblock attempt
+
+An independent HTTP probe from the jump host confirmed that `Packages.gz`,
+`Packages.manifest`, and the new `26.7.11-r20` IPK return HTTP 200, while both
+`Packages.sig` and `xray-core_26.6.1-r13_x86_64.ipk` return HTTP 404. The feed
+directory lists only the new Xray IPK. The maintainer's public
+`kiddin9/op-packages` and `kiddin9/openwrt-passwall-packages` repositories
+contain source recipes but publish no release assets or signed historical IPK.
+A source recipe or third-party mirror is not an acceptable substitute for the
+exact provenance-verified rollback package.
+
+Before this investigation, a router-compatible `pidof`/`netstat` check again
+confirmed two `/usr/bin/xray` processes and listeners `1070`, `1041`, `11400`,
+and `15353`. The earlier zero result was a probe compatibility error because
+this router does not provide `ss`; it was not a PassWall outage. No install,
+restart, feed change, key change, or runtime modification was performed.
