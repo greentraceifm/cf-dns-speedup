@@ -227,3 +227,22 @@ open. Any upstream response must still be independently verified against the
 published key, package metadata, size, and SHA256 before preflight may resume;
 a reply or third-party attachment alone is not sufficient authorization to
 install.
+
+## 2026-07-25 upstream follow-up
+
+Issue `kiddin9/op-packages#5` remains open with no maintainer comments. Direct
+checks still return HTTP 404 for both the configured feed's `Packages.sig` and
+`xray-core_26.6.1-r13_x86_64.ipk`.
+
+The official `Openwrt-Passwall/openwrt-passwall-packages` release channel was
+also reviewed as a possible alternative. It publishes Xray release-API cache
+JSON, but no Xray core IPK or signed package feed. The latest
+`Openwrt-Passwall/openwrt-passwall` release publishes an APK for OpenWrt
+25.12+, while its IPKs are explicitly targeted at 22.03 or 23.05-24.10 and do
+not contain the Xray core. The current Kwrt 25.12 system uses opkg. Mixing those
+artifacts would expand the authorized Xray-only change into an unsupported
+package-manager and full-plugin migration, without solving exact rollback.
+
+The state therefore remains `waiting_upstream_artifacts`. No package download,
+installation, PassWall restart, feed/key change, or router modification was
+performed.
