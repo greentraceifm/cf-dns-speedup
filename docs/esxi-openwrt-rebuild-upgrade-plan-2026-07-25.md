@@ -1,245 +1,214 @@
-# ESXi and OpenWrt rebuild plan - 2026-07-25
+# ESXi 与 OpenWrt 重建升级计划 - 2026-07-25
 
-## Decision
+## 决策结论
 
-Rebuild `192.168.1.254` as a clean parallel OpenWrt VM on the existing ESXi
-6.7 host before considering any ESXi host upgrade. Do not rebuild
-`192.168.1.110`. Do not install Proxmox. ESXi 8 validation on the empty
-Samsung T5 is a separate, optional second phase and must not begin until the
-new OpenWrt VM has passed its observation period.
+先在现有 ESXi 6.7 主机上并行重建 `192.168.1.254` 的全新 OpenWrt
+虚拟机，再考虑 ESXi 主机升级。不要重建 `192.168.1.110`，不要安装
+Proxmox。使用空闲 Samsung T5 验证 ESXi 8 属于独立、可选的第二阶段，
+只有新 OpenWrt 虚拟机通过观察期后才可以开始。
 
-This order addresses the current package provenance problem without combining
-it with a hypervisor migration. The existing Kwrt system is operational, but
-its package feed does not provide a signed index or the exact provenance-
-verified rollback IPK required by the Xray-only upgrade policy. A clean image
-with one internally consistent, signed package ecosystem is safer than forcing
-an in-place package-manager or feed transition.
+这个顺序可以解决当前软件包来源不可验证的问题，同时避免把 OpenWrt
+重建与虚拟化平台迁移两个风险叠加。当前 Kwrt 系统运行正常，但其软件源
+没有提供签名索引，也没有满足 Xray 单项升级回滚要求的、来源可验证的
+旧版本 IPK。与其强行进行原地包管理器或软件源迁移，不如使用操作系统、
+包管理器、PassWall、Xray 和软件源相互匹配的全新镜像。
 
-## Verified baseline
+## 已验证基线
 
-Read-only checks after the 2026-07-25 memory adjustment established:
+2026-07-25 调整内存后的只读检查结果如下：
 
-- ESXi host `192.168.1.238`: VMware ESXi 6.7 U3 build `20497097`, standalone
-  Host Client, Intel i7-7500U with 2 cores, and `32,686 MB` physical memory.
-- Current host memory use was approximately `4,639 MB`, leaving an estimated
-  `28,047 MB` available. No running VM showed ballooning, swapping, or
-  compressed memory.
-- `Ubuntu-Ollama` (`192.168.1.110`) is now configured with `16,384 MB`. The
-  guest reported `15,993 MB` total and approximately `15,228 MB` available,
-  with zero swap use and low load after reboot.
-- Docker/containerd, PostgreSQL, Redis, Sub2API, Node, Ollama, and the Sidecar
-  timer returned after the `.110` reboot. Ollama had no resident model;
-  Sidecar was enabled and waiting for its next natural run; Google and YouTube
-  checks returned HTTP 204.
-- `Openwrt_Jump63` (`192.168.1.254`) has 1 vCPU, 1 GiB RAM, one vNIC on
-  `VM Network`, and two existing snapshots. The snapshots are not backups and
-  must not be deleted or consolidated during this project.
-- `Ros` is the physical WAN/LAN routing VM. `192.168.1.140` is only a
-  management jump host. Scheduled CFIP and proxy operation do not depend on
-  `.140` being powered on.
-- The Intel 800 GB SSD contains the current ESXi boot partitions and datastore,
-  has about 665 GB free, reports healthy SMART status, and has media wear
-  indicator `72`.
-- The Samsung T5 1 TB is healthy, unpartitioned, and confirmed empty. It is a
-  candidate test boot device only. The Intel SSD remains the production and
-  default boot device.
-- Six Intel I211 NICs use the ESXi `igbn` driver. `vmnic0` had two brief link
-  flaps on 2026-07-24; `vmnic1` negotiated only 10 Mbps. These are pre-existing
-  hardware/path findings and must not be attributed to the rebuild.
-- ESXi SSH and Shell are always enabled, NTP is configured but inactive, there
-  is no TPM/IPMI, image acceptance is `CommunitySupported`, and `upsmon` is the
-  only community VIB. Physical presence is therefore required for any cold
-  boot experiment.
+- ESXi 主机 `192.168.1.238`：VMware ESXi 6.7 U3 build `20497097`，
+  使用独立 Host Client 管理；CPU 为 2 核 i7-7500U；物理内存
+  `32,686 MB`。
+- 当时主机内存使用约 `4,639 MB`，估算可用约 `28,047 MB`。所有运行中
+  虚拟机均未出现 balloon、swap 或内存压缩。
+- `Ubuntu-Ollama`（`192.168.1.110`）现配置为 `16,384 MB`。重启后客户机
+  报告总内存 `15,993 MB`、可用约 `15,228 MB`，Swap 使用量为零，负载低。
+- `.110` 重启后 Docker/containerd、PostgreSQL、Redis、Sub2API、Node、
+  Ollama 和 Sidecar timer 均已恢复。Ollama 没有驻留模型，Sidecar 已启用
+  并等待下一次自然运行，Google 和 YouTube 检查均返回 HTTP 204。
+- `Openwrt_Jump63`（`192.168.1.254`）配置为 1 vCPU、1 GiB 内存、一张连接
+  `VM Network` 的虚拟网卡，并存在两个快照。快照不等于备份，本项目期间
+  不得删除或合并快照。
+- `Ros` 是实际 WAN/LAN 路由虚拟机。`192.168.1.140` 只用于管理跳板，
+  即使 `.140` 关机，定时 CFIP 和代理链路也不依赖它。
+- Intel 800 GB SSD 包含当前 ESXi 启动分区和 datastore，剩余约 665 GB，
+  SMART 状态正常，media wear indicator 为 `72`。
+- Samsung T5 1 TB 状态正常、未分区，并已确认没有数据。它只作为测试启动
+  盘候选；Intel SSD 继续作为生产盘和默认启动盘。
+- 六张 Intel I211 网卡使用 ESXi `igbn` 驱动。`vmnic0` 在 2026-07-24
+  出现过两次短暂物理链路抖动；`vmnic1` 只协商到 10 Mbps。这些是变更前
+  已存在的硬件或链路现象，不能错误归因于本次重建。
+- ESXi SSH 和 Shell 长期开启；NTP 已配置但服务未运行；没有 TPM/IPMI；
+  image acceptance 为 `CommunitySupported`；唯一社区 VIB 是 `upsmon`。
+  因此任何冷启动试验都必须有人在设备旁边。
 
-The ESXi root credential previously appeared in a screenshot. It is not stored
-in this repository or plan. The user's decision not to rotate it does not
-block the rebuild, but remains a security risk to address separately.
+用户提供的截图曾出现 ESXi root 凭据。本仓库和本计划均未保存该凭据。
+用户暂不轮换凭据的决定不会阻止重建，但它仍是需要另行处理的安全风险。
 
-## Non-negotiable boundaries
+## 不可突破的边界
 
-- Preserve the current `.254` VM, virtual disk, snapshots, MAC information,
-  and Intel datastore until the full rollback period is closed.
-- Do not replace `/etc` wholesale. Migrate only inventoried configuration
-  objects into a matching target schema.
-- Do not change Cloudflare `auto` through `auto4`, candidate/champion/stable
-  pools, the real PassWall `>= 6.5 MB/s` gate, Sidecar policy, subscriptions,
-  credentials, firewall intent, or routing intent.
-- Do not re-enable historical proxy-stopping CFIP jobs. Sidecar remains the
-  no-outage discovery/competition path.
-- Never run the old and new VM with the same IP or MAC on the same port group.
-- Do not upgrade VM hardware compatibility, VMFS, virtual disks, or snapshots
-  during the rollback period.
-- Keep the Intel SSD first in persistent BIOS boot order. ESXi 8 on T5, if
-  tested, is selected only from the one-time boot menu.
+- 完整保留旧 `.254` 虚拟机、虚拟磁盘、快照、MAC 信息和 Intel datastore，
+  直到回滚观察期正式结束。
+- 禁止整体覆盖 `/etc`。只能把经过清点的配置对象迁移到目标版本对应结构。
+- 不修改 Cloudflare `auto` 至 `auto4`、候选池、冠军池、稳定池、真实
+  PassWall `>= 6.5 MB/s` 门槛、Sidecar 策略、订阅、凭据、防火墙意图或
+  路由意图。
+- 不得重新启用历史上会停止 PassWall 的 CFIP 任务。Sidecar 继续作为
+  无中断发现和竞争候选验证路径。
+- 禁止新旧虚拟机以相同 IP 或相同 MAC 同时连接同一个 port group。
+- 回滚观察期内不升级 VM hardware compatibility、VMFS、虚拟磁盘格式，
+  也不处理旧快照。
+- BIOS 持久启动顺序始终保持 Intel SSD 第一。若测试 T5 上的 ESXi 8，
+  每次只通过一次性启动菜单选择 T5。
 
-## Phase 0: evidence and recovery preparation
+## 阶段 0：证据和恢复准备
 
-Complete this phase before creating or changing a VM:
+创建或修改任何虚拟机之前，必须完成以下工作：
 
-1. Print or locally retain the manual rollback runbook in this repository.
-2. Record the old `.254` VM inventory name/ID, datastore VMX path, disk path,
-   current vNIC MAC, port group, firmware mode, CPU/RAM, and autostart order.
-3. Export an ESXi host configuration backup using a method valid for the exact
-   6.7 build. Verify the archive is non-empty and readable off the host.
-4. Create an independent cold copy/export of the `.254` VM while it is cleanly
-   powered off in a planned window. Do not call its snapshots a backup.
-5. From OpenWrt, record package versions, UCI section names and relationships,
-   interfaces, routes, firewall zones, DHCP/DNS/SmartDNS behavior, PassWall
-   global node, ACLs, listeners, cron state, CFIP file inventory, ownership,
-   modes, and hashes. Keep secrets only in a protected local backup.
-6. Verify the existing `.254` can be powered on from the ESXi console and that
-   a direct LAN client can reach `https://192.168.1.238` without PassWall.
-7. Choose a temporary management IP only after checking the DHCP pool, static
-   reservations, router tables, ARP/neighbour tables, and live ICMP/ARP use.
-   Record the chosen IP in the rollback runbook. Do not assume `.253` is free.
-8. Photograph or write down the physical NIC/cable mapping and label the Intel
-   SSD and Samsung T5 before any host-level work.
+1. 打印或在本地离线保存本仓库中的手工回滚说明书。
+2. 记录旧 `.254` 的虚拟机名称/ID、datastore VMX 路径、虚拟磁盘路径、
+   当前虚拟网卡 MAC、port group、固件模式、CPU/内存和自动启动顺序。
+3. 使用与当前 ESXi 6.7 build 匹配的方法导出 ESXi 主机配置备份，并在
+   主机外验证备份文件非空、可读。
+4. 在计划窗口内正常关闭旧 `.254`，制作独立冷备份或导出副本。不得把
+   现有两个快照当作这份备份。
+5. 从 OpenWrt 记录包版本、UCI section 名称和关系、接口、路由、防火墙区、
+   DHCP/DNS/SmartDNS 行为、PassWall 全局节点、ACL、监听端口、cron 状态、
+   CFIP 文件清单、所有者、权限和哈希。秘密只能留在受保护的本地备份中。
+6. 确认旧 `.254` 能从 ESXi 控制台正常启动，并确认 LAN 内客户端不依赖
+   PassWall 就能直接打开 `https://192.168.1.238`。
+7. 只有检查 DHCP 池、静态保留、路由表、ARP/邻居表以及实时 ICMP/ARP 后，
+   才能选择临时管理 IP，并把结果写入回滚说明书。不得直接假设 `.253`
+   空闲。
+8. 拍照或记录物理网卡/网线对应关系，并在任何主机级操作前标记 Intel SSD
+   和 Samsung T5。
 
-Stop if the host backup, cold VM backup, direct ESXi management path, old VM
-boot test, or a conflict-free temporary IP cannot be independently verified.
+如果主机配置备份、旧 VM 冷备份、直连 ESXi 管理路径、旧 VM 启动测试或
+无冲突临时 IP 中任一项不能独立验证，立即停止。
 
-## Phase 1: clean parallel `.254` rebuild on ESXi 6.7
+## 阶段 1：在 ESXi 6.7 上并行重建 `.254`
 
-### 1. Select a coherent target
+### 1. 选择内部一致的目标系统
 
-Use a maintained x86-64 OpenWrt-derived image whose base OS, package manager,
-PassWall application, Xray core, and package feeds are intended to work
-together. Record image URL, release/version, architecture, published digest,
-signing key/source, package repository URLs, and support lifecycle.
+选择仍受维护的 x86-64 OpenWrt 衍生镜像，并确保基础系统、包管理器、
+PassWall 应用、Xray 核心和软件源明确相互兼容。记录镜像 URL、版本、
+架构、发布方摘要、签名密钥或来源、软件源 URL 和支持周期。
 
-Reject the target if any of these are unclear, if it requires mixing APK and
-OPKG artifacts, if the image requires an unsigned third-party feed for the
-production proxy path, or if the exact install and rollback artifacts cannot
-be retained locally.
+出现以下任一情况就拒绝该目标：来源或支持关系不清楚；必须混用 APK 和
+OPKG；生产代理必须依赖无签名第三方软件源；无法在本地保留精确的安装包
+和回滚包。
 
-### 2. Build without an address conflict
+### 2. 在不发生地址冲突的条件下创建
 
-Create a new VM with conservative hardware compatible with ESXi 6.7. Initially
-leave its production vNIC disconnected or attach it to an isolated staging
-port group. Install and verify the image through the ESXi console.
+使用 ESXi 6.7 支持的保守虚拟硬件创建新 VM。最初断开生产虚拟网卡，
+或者连接隔离 staging port group，通过 ESXi 控制台完成安装和基础验证。
 
-When ready for LAN testing, use a unique VMware MAC and the previously verified
-temporary IP. Keep the old VM at `.254`. Confirm from two LAN devices that the
-temporary address and `.254` resolve to different MACs. Any duplicate-address
-warning, ARP movement, or unexpected DHCP lease is a hard stop.
+准备进行 LAN 测试时，使用独立的 VMware MAC 和阶段 0 验证过的临时 IP。
+旧 VM 继续占用 `.254`。至少从两台 LAN 设备确认临时 IP 和 `.254` 分别
+对应不同 MAC。只要出现重复地址告警、ARP 来回漂移或异常 DHCP 租约，
+立即停止。
 
-### 3. Migrate semantically
+### 3. 按语义迁移配置
 
-Recreate configuration through the target release's supported UCI/package
-interfaces. Migrate only reviewed objects:
+通过目标版本支持的 UCI 和包管理接口重新创建配置，只迁移经过审核的对象：
 
-- the single-interface management/network intent and required static routes;
-- dnsmasq/SmartDNS behavior and local records;
-- firewall zones/rules required by the current topology;
-- PassWall node and ACL semantics, TLS/WS settings, and listener topology;
-- CFIP scripts, systemd/cron equivalents, state files, pools, permissions, and
-  explicit no-proxy-stop safety controls;
-- only the credentials required by those objects, transferred through a
-  protected local channel and never committed or logged.
+- 单接口管理/网络意图和必要静态路由；
+- dnsmasq、SmartDNS 行为和本地域名记录；
+- 当前拓扑真正需要的防火墙区和规则；
+- PassWall 节点与 ACL 语义、TLS/WS 参数和监听拓扑；
+- CFIP 脚本、对应 systemd/cron、状态文件、池、权限以及明确禁止停止代理
+  的安全开关；
+- 这些对象实际需要的凭据，只能通过受保护本地通道传输，禁止提交或输出。
 
-Do not import old init scripts, package database, feed configuration, binaries,
-generated runtime JSON, `/tmp`, logs, or the complete old `/etc` tree.
+不得导入旧 init 脚本、包数据库、feed 配置、二进制文件、生成的 runtime
+JSON、`/tmp`、日志或整个旧 `/etc`。
 
-### 4. Test on the temporary address
+### 4. 使用临时地址测试
 
-All of the following must pass before cutover:
+切换前必须全部通过：
 
-- clean boot and repeat boot; correct clock; adequate storage and inodes;
-- signed package metadata and internally consistent installed versions;
-- DNS resolution and DNS-policy behavior without advertising the new VM as
-  production DNS;
-- PassWall configuration validation, two expected Xray instances, and required
-  listeners `1070`, `1041`, `11400`, and `15353` on the intended interfaces;
-- global node and ACL behavior using explicitly selected test clients only;
-- Google/YouTube HTTP checks and a real proxy-path throughput baseline;
-- CFIP report-only/observation commands in dry-run or read-only mode;
-- no PassWall stop/restart from any scheduled CFIP path;
-- no write to Cloudflare DNS or any production pool during testing;
-- a reboot test showing services, listeners, permissions, and timers recover.
+- 首次启动和重复重启正常；时间正确；存储空间和 inode 充足；
+- 包元数据有可验证签名，安装版本内部一致；
+- DNS 解析和 DNS 策略正常，但测试期间不向生产客户端发布新 VM 为 DNS；
+- PassWall 配置验证通过；存在预期的两个 Xray 实例；端口 `1070`、`1041`、
+  `11400`、`15353` 在预期接口监听；
+- 只对明确选择的测试客户端验证全局节点和 ACL 行为；
+- Google/YouTube HTTP 检查通过，并取得真实代理路径吞吐基线；
+- CFIP 报告和观察命令只能使用 dry-run 或只读模式验证；
+- 所有定时 CFIP 路径都不会停止或重启 PassWall；
+- 测试期间不写 Cloudflare DNS，不写任何生产池；
+- 重启后服务、监听、权限和 timer 能自动恢复。
 
-### 5. Minimal cutover
+### 5. 最小化切换
 
-Schedule a staffed low-traffic window. Open the ESXi console for both VMs and
-keep a direct LAN management session to `.238`.
+选择有人值守的低流量窗口，同时打开新旧 VM 的 ESXi 控制台，并保留一条
+LAN 内直连 `.238` 的管理会话。
 
-1. Confirm all preflight checks and backups again; pause unrelated maintenance.
-2. Cleanly power off the old `.254` VM. Do not delete it or detach its disk.
-3. Confirm `.254` no longer answers and its MAC ages out/clears from LAN ARP.
-4. Change the new VM from the temporary IP to `.254`, using the already tested
-   production network configuration. Keep its unique MAC unless a documented
-   dependency requires the old MAC.
-5. Start/activate the new network and validate gateway, DNS, Xray processes,
-   all four listeners, proxy HTTP, ACL behavior, and `auto..auto4` views.
-6. Record the last successful old-path probe and first successful new-path
-   probe. Existing TCP sessions may reconnect; strict zero-session-loss is not
-   technically guaranteed.
+1. 再次确认所有门控和备份，暂停无关维护任务。
+2. 正常关闭旧 `.254` VM，不删除 VM，不分离虚拟磁盘。
+3. 确认 `.254` 已不再响应，并等待其 MAC 从 LAN ARP 中老化或清除。
+4. 把新 VM 从临时 IP 改为 `.254`，启用已经测试过的生产网络配置。除非
+   存在经过记录的强依赖，否则继续使用新 VM 自己的唯一 MAC。
+5. 启用新网络，依次验证网关、DNS、两个 Xray 进程、四个监听端口、代理
+   HTTP、ACL 行为以及 `auto..auto4` 三路解析。
+6. 记录旧路径最后一次成功探测和新路径第一次成功探测的时间。已有 TCP
+   会话可能需要重连，技术上无法保证绝对零会话丢失。
 
-Rollback immediately on management loss, DNS failure, listener loss, ACL
-misrouting, repeated proxy failure, unexplained route/firewall drift, or a
-material throughput collapse. Do not troubleshoot production in place beyond
-the short pre-agreed cutover budget.
+出现管理失联、DNS 失败、监听丢失、ACL 错路由、持续代理失败、无法解释的
+路由/防火墙漂移或吞吐明显崩塌时，立即回滚。不要超过事先约定的短切换
+预算在生产环境中持续排错。
 
-### 6. Observation and closeout
+### 6. 观察和收口
 
-Keep the old VM powered off but intact. Do not upgrade its virtual hardware or
-consolidate snapshots. Observe at least three natural Sidecar cycles and the
-normal OpenWrt/PassWall observation windows. Confirm no proxy-stopping job,
-DNS drift, residue, lock conflict, or automatic promotion bypass occurs.
+旧 VM 保持关机但完整保留。不得升级其虚拟硬件，不得合并快照。至少观察
+三个自然 Sidecar 周期和正常 OpenWrt/PassWall 观察窗口，确认不存在代理
+停止任务、DNS 漂移、残留、锁冲突或绕过门槛的自动晋级。
 
-Close Phase 1 only after configuration exports, package artifacts, checksums,
-the final migration map, and measured interruption are stored without secrets.
-Only then may the old VM be archived according to a separately approved
-retention decision.
+只有在无秘密地保存配置导出、精确安装包、校验值、最终迁移映射和实际中断
+时长后，阶段 1 才能收口。旧 VM 的归档或删除必须另行批准。
 
-## Phase 2: optional ESXi 8 cold validation on Samsung T5
+## 阶段 2：可选的 Samsung T5 ESXi 8 冷验证
 
-This phase does not improve CFIP speed by itself. Its purpose is to determine
-whether a supported-enough hypervisor can replace the out-of-support ESXi 6.7
-host without risking the Intel production installation. It requires physical
-presence and a separate maintenance window with accepted outage.
+本阶段本身不会提高 CFIP 速度。目标是判断能否用较新的虚拟化平台替代已经
+停止官方支持的 ESXi 6.7，同时不冒险改写 Intel 生产安装。必须有人在现场，
+并在单独维护窗口接受整台主机中断。
 
-1. Reconfirm the T5 identity, serial/capacity, empty status, SMART/health, and
-   cable stability. Reconfirm the Intel SSD identity separately.
-2. Retain the ESXi 6.7 host configuration backup and independent VM backups.
-3. Install ESXi 8 only to the Samsung T5. Verify the target device by model,
-   capacity, and identifier at the installer screen. If the installer cannot
-   distinguish it unambiguously from the Intel SSD, stop. Physically
-   disconnecting the Intel device during installation is preferred when safe
-   and practical.
-4. Keep Intel first in persistent boot order. Use the firmware one-time boot
-   menu to select the T5 for each experiment.
-5. First boot ESXi 8 without registering or powering on production VMs. Check
-   CPU acceptance, USB boot persistence, management networking, all six I211
-   NICs, VLAN/port groups, datastore visibility, logs, time, and repeated cold
-   boots.
-6. Do not import `upsmon` or other community VIBs until native host stability
-   is proven. Do not upgrade VMFS or any VM hardware compatibility.
-7. If host-only checks pass, create a disposable test VM on T5 and verify each
-   required network path. A later, separately approved window may register
-   copies of production VMs for controlled validation.
+1. 再次确认 T5 的型号、序列号/容量、空盘状态、健康状况和线缆稳定性；
+   同时单独确认 Intel SSD 身份。
+2. 保留 ESXi 6.7 主机配置备份和所有独立 VM 备份。
+3. ESXi 8 只能安装到 Samsung T5。安装界面必须通过型号、容量和设备标识
+   明确确认目标。如果不能清楚区分 T5 和 Intel SSD，立即停止。在安全且
+   实际可行时，安装阶段优先物理断开 Intel SSD。
+4. BIOS 持久启动顺序保持 Intel 第一。每次实验只用固件一次性启动菜单
+   选择 T5。
+5. 第一次进入 ESXi 8 时不要注册或启动生产 VM。先验证 CPU 接受状态、USB
+   启动持久性、管理网络、六张 I211、VLAN/port group、datastore 可见性、
+   日志、时间和多次冷启动。
+6. 在原生主机稳定前，不导入 `upsmon` 或其他社区 VIB；不升级 VMFS 或
+   任何 VM hardware compatibility。
+7. 主机级检查通过后，在 T5 上创建一次性测试 VM，验证所有必需网络路径。
+   只有经过另一次单独批准，后续窗口才可以注册生产 VM 副本做受控测试。
 
-Stop and return to Intel ESXi 6.7 if ESXi 8 requires an unsupported CPU bypass,
-misses any required I211 NIC, cannot reliably boot from T5, cannot preserve the
-management path, reports storage instability, requires unreviewed community
-drivers, or cannot leave the Intel datastore untouched.
+如果 ESXi 8 需要不受支持的 CPU 绕过参数、缺少任一必需 I211 网卡、无法
+从 T5 稳定启动、无法维持管理网络、出现存储不稳定、必须依赖未评审社区
+驱动，或者不能保证 Intel datastore 不被修改，就停止并返回 Intel 上的
+ESXi 6.7。
 
-## Final acceptance
+## 最终验收标准
 
-The rebuild is successful only when:
+只有同时满足以下条件，重建才算成功：
 
-- `.238`, `Ros`, new `.254`, and `.110` boot in the documented order;
-- PassWall has the intended version set, two Xray processes, and all four
-  listeners;
-- node, ACL, TLS, DNS, firewall, route, subscription, and CFIP semantics match
-  the approved migration inventory;
-- Google/YouTube work from PC, `.110`, `.140` when powered on, and the router;
-- `auto..auto4` match across LAN, router, and public DNS, without an
-  unauthorized Cloudflare write;
-- Sidecar/Docker/Ollama are healthy and all project locks/residue checks pass;
-- three natural Sidecar/PassWall observation windows complete without outage;
-- the manual rollback procedure has been dry-read by the person who will be
-  physically present.
+- `.238`、`Ros`、新 `.254` 和 `.110` 按规定顺序正常启动；
+- PassWall 版本组合符合计划，存在两个 Xray 进程和四个监听端口；
+- 节点、ACL、TLS、DNS、防火墙、路由、订阅和 CFIP 语义与批准的迁移清单
+  一致；
+- PC、`.110`、开机时的 `.140` 和路由器均能正常访问 Google/YouTube；
+- `auto..auto4` 在 LAN、路由器和公共 DNS 中一致，且没有未经授权的
+  Cloudflare 写入；
+- Sidecar、Docker、Ollama 健康，项目锁和残留检查全部通过；
+- 三个自然 Sidecar/PassWall 观察窗口均未发生代理中断；
+- 现场执行人已经完整阅读并理解手工回滚说明书。
 
-The existing PassWall Xray in-place upgrade remains deferred. The relevant
-provenance findings and upgrade policy remain in
-`docs/passwall-upgrade-plan-2026-07-22.md`.
+现有 PassWall Xray 原地升级继续延期。相关软件包来源问题和升级规则保留在
+`docs/passwall-upgrade-plan-2026-07-22.md`。
