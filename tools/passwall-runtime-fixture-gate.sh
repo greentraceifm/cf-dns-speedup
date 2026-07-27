@@ -4,6 +4,8 @@ set -eu
 
 INPUT=${1:-}
 EXPECTED_SHA256=${2:-}
+XRAY_TEST_BIN=${3:-/usr/bin/xray}
+EXPECTED_XRAY_SHA256=${4:-}
 WORK="/tmp/passwall-runtime-fixture-$$"
 SYSTEM_TMP=/tmp/etc/passwall
 RUNTIME_JSON="$WORK/runtime/fixture-runtime.json"
@@ -45,6 +47,19 @@ trap cleanup EXIT HUP INT TERM
 
 actual_sha256=$(sha256sum "$INPUT" | awk '{print $1}')
 [ "$actual_sha256" = "$EXPECTED_SHA256" ] || fail input_hash_mismatch
+
+case "$XRAY_TEST_BIN" in
+	/usr/bin/xray) ;;
+	/tmp/cfip-xray-production-test/xray)
+		[ -n "$EXPECTED_XRAY_SHA256" ] || fail missing_xray_sha256
+		[ -f "$XRAY_TEST_BIN" ] || fail xray_not_regular
+		[ ! -L "$XRAY_TEST_BIN" ] || fail xray_symlink
+		[ -x "$XRAY_TEST_BIN" ] || fail xray_not_executable
+		actual_xray_sha256=$(sha256sum "$XRAY_TEST_BIN" | awk '{print $1}')
+		[ "$actual_xray_sha256" = "$EXPECTED_XRAY_SHA256" ] || fail xray_hash_mismatch
+		;;
+	*) fail xray_test_path_not_allowed ;;
+esac
 
 [ "$(uci -q get passwall.@global[0].enabled)" = "0" ] || fail staging_uci_enabled
 if /etc/init.d/passwall enabled >/dev/null 2>&1; then
@@ -130,7 +145,7 @@ esac
 [ -s "$RUNTIME_JSON" ] || fail runtime_json_missing
 chmod 600 "$RUNTIME_JSON"
 
-/usr/bin/xray run -test -c "$RUNTIME_JSON" > "$TEST_LOG" 2>&1 || fail installed_xray_test_failed
+"$XRAY_TEST_BIN" run -test -c "$RUNTIME_JSON" > "$TEST_LOG" 2>&1 || fail xray_test_failed
 
 [ "$(count_processes xray)" = "0" ] || fail xray_process_started
 [ "$(count_processes haproxy)" = "0" ] || fail haproxy_process_started
@@ -143,7 +158,7 @@ fi
 
 echo "RUNTIME_FIXTURE_STATUS=success"
 echo "RUNTIME_FIXTURE_BYTES=$(wc -c < "$RUNTIME_JSON")"
-echo "RUNTIME_FIXTURE_XRAY_VERSION=$(/usr/bin/xray version 2>/dev/null | sed -n '1s/^Xray //p' | awk '{print $1}')"
+echo "RUNTIME_FIXTURE_XRAY_VERSION=$("$XRAY_TEST_BIN" version 2>/dev/null | sed -n '1s/^Xray //p' | awk '{print $1}')"
 echo "RUNTIME_FIXTURE_GENERATOR_RC=$generation_rc"
 echo "RUNTIME_FIXTURE_XRAY_TEST=success"
 echo "RUNTIME_FIXTURE_XRAY_PROCS=0"
