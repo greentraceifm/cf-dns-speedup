@@ -1,0 +1,24 @@
+config global
+	option enabled '0'
+	option tcp_node 'nil'
+	option udp_node 'nil'
+
+config global_rules
+	option tcp_proxy_mode 'chnroute'
+	option udp_proxy_mode 'chnroute'
+
+config nodes 'node_a'
+	option remarks 'public-fixture'
+	option type 'Xray'
+	option protocol 'VMess'
+	option address '198.51.100.10'
+	option port '443'
+	option uuid '00000000-0000-4000-8000-000000000001'
+	option security 'auto'
+	option transport 'ws'
+	option ws_host 'fixture.invalid'
+	option ws_path '/fixture'
+	option tls '1'
+	option tls_serverName 'fixture.invalid'
+	list alpn 'h2'
+	list alpn 'http/1.1'
