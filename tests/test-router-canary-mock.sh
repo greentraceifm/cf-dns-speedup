@@ -44,7 +44,7 @@ esac
 EOF
 cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env sh
-printf '200\t20000000\t7340032\n'
+printf '200\t20000000\t4194304\n'
 EOF
 cat > "$BIN/fake-xray" <<'EOF'
 #!/usr/bin/env bash
@@ -59,10 +59,10 @@ printf 'config passwall\n' > "$TMP_DIR/passwall"
 printf '{"outbounds":[{"protocol":"vmess","tag":"proxy","settings":{"address":"104.17.1.10"}}]}\n' > "$TMP_DIR/runtime.json"
 NOW="$(date +%s)"
 OBSERVED_AT="$(date '+%F %T')"
-HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
+HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode\tcandidate_tier'
 {
   printf '%s\n' "$HEADER"
-  printf 'cfip-sidecar-candidates-v1\t%s\t%s\t104.17.1.10\t9.00\t6.80\t6.70\t6.70\t6.75\t200\t200\tpass\tsidecar_proxy\n' "$NOW" "$OBSERVED_AT"
+  printf 'cfip-sidecar-candidates-v2\t%s\t%s\t104.17.1.10\t9.00\t4.20\t4.00\t4.00\t4.10\t200\t200\tlow\tsidecar_proxy\tobservation\n' "$NOW" "$OBSERVED_AT"
 } > "$TMP_DIR/export.tsv"
 
 sleep 60 &
@@ -80,8 +80,8 @@ export CFIP_ROUTER_CANARY_PORT=19080
 
 bash "$ROOT/router-candidate-gate.sh" import "$TMP_DIR/export.tsv" >/dev/null
 bash "$ROOT/router-candidate-gate.sh" canary 104.17.1.10 > "$TMP_DIR/canary.out"
-grep -q 'min=7.00MB/s status=pass' "$TMP_DIR/canary.out"
-awk -F '\t' 'NR == 2 && $2 == "104.17.1.10" && $6 == "7.00" && $12 == "pass" {found=1} END {exit found ? 0 : 1}' \
+grep -q 'min=4.00MB/s status=pass' "$TMP_DIR/canary.out"
+awk -F '\t' 'NR == 2 && $2 == "104.17.1.10" && $6 == "4.00" && $12 == "pass" {found=1} END {exit found ? 0 : 1}' \
   "$APP_DIR/router-candidate-canary.latest.tsv"
 kill -0 "$FAKE_EXISTING_PID" 2>/dev/null || { echo "existing Xray process was stopped" >&2; exit 1; }
 [ ! -e "$FAKE_CANARY_MARKER" ] || { echo "isolated Xray marker remains" >&2; exit 1; }

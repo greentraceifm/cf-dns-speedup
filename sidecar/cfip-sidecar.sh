@@ -28,6 +28,7 @@ SIDECAR_PATH_CHECK_URL="${SIDECAR_PATH_CHECK_URL:-https://www.cloudflare.com/cdn
 SIDECAR_PATH_CHECK_ATTEMPTS="${SIDECAR_PATH_CHECK_ATTEMPTS:-3}"
 SIDECAR_PATH_CHECK_RETRY_DELAY="${SIDECAR_PATH_CHECK_RETRY_DELAY:-3}"
 SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP="${SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP:-1}"
+SIDECAR_HOST_EXIT_RELATION="${SIDECAR_HOST_EXIT_RELATION:-different}"
 
 SIDECAR_TEST_URL="${SIDECAR_TEST_URL:-https://greentrace-speedtest.pages.dev/20mb.bin}"
 SIDECAR_DIRECT_INITIAL_COUNT="${SIDECAR_DIRECT_INITIAL_COUNT:-50}"
@@ -37,6 +38,9 @@ SIDECAR_DIRECT_MIN_MBPS="${SIDECAR_DIRECT_MIN_MBPS:-8}"
 SIDECAR_DIRECT_REQUIRED="${SIDECAR_DIRECT_REQUIRED:-5}"
 SIDECAR_CANDIDATE_LIMIT="${SIDECAR_CANDIDATE_LIMIT:-5}"
 SIDECAR_PROXY_MIN_MBPS="${SIDECAR_PROXY_MIN_MBPS:-6.5}"
+SIDECAR_EXPORT_OBSERVATION_MIN_MBPS="${SIDECAR_EXPORT_OBSERVATION_MIN_MBPS:-3.5}"
+SIDECAR_EXPORT_EXCELLENT_MIN_MBPS="${SIDECAR_EXPORT_EXCELLENT_MIN_MBPS:-6.5}"
+SIDECAR_EXPORT_LIMIT="${SIDECAR_EXPORT_LIMIT:-3}"
 SIDECAR_PROXY_MIN_BYTES="${SIDECAR_PROXY_MIN_BYTES:-20000000}"
 SIDECAR_PROXY_ROUNDS="${SIDECAR_PROXY_ROUNDS:-2}"
 SIDECAR_DIAG_ALT_URL="${SIDECAR_DIAG_ALT_URL:-https://speed.cloudflare.com/__down?bytes=20000000}"
@@ -132,7 +136,10 @@ export_candidates() {
   prepare_export_dir
   result="$(
     "$PYTHON_BIN" "$SCRIPT_DIR/export-candidates.py" \
-      --source "$report" --destination "$EXPORT_FILE" --min-mbps 6.5
+      --source "$report" --destination "$EXPORT_FILE" \
+      --min-mbps "$SIDECAR_EXPORT_OBSERVATION_MIN_MBPS" \
+      --excellent-min-mbps "$SIDECAR_EXPORT_EXCELLENT_MIN_MBPS" \
+      --limit "$SIDECAR_EXPORT_LIMIT"
   )" || die "candidate export failed; previous export was preserved"
   log "candidate export complete: $result; destination=$EXPORT_FILE"
 }
@@ -245,6 +252,10 @@ validate_path_probe_settings() {
   case "$SIDECAR_PATH_CHECK_RETRY_DELAY" in
     ''|*[!0-9]*) die "SIDECAR_PATH_CHECK_RETRY_DELAY must be a non-negative integer" ;;
   esac
+  case "$SIDECAR_HOST_EXIT_RELATION" in
+    same|different) ;;
+    *) die "SIDECAR_HOST_EXIT_RELATION must be same or different" ;;
+  esac
 }
 
 capture_public_ip_with_retries() {
@@ -292,10 +303,19 @@ network_probe() {
   sidecar_ip="$(capture_public_ip_with_retries "sidecar public-IP probe" sidecar_public_ip_probe_once "$name")" \
     || die "sidecar public-IP probe failed"
   ACTIVE_CONTAINERS="$(printf '%s\n' "$ACTIVE_CONTAINERS" | sed "s/ $name//")"
-  if [ "$SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP" = "1" ] && [ "$host_ip" = "$sidecar_ip" ]; then
-    die "sidecar and proxied host expose the same public IP; direct bypass is not proven"
+  if [ "$SIDECAR_REQUIRE_DIFFERENT_PUBLIC_IP" = "1" ]; then
+    case "$SIDECAR_HOST_EXIT_RELATION" in
+      different)
+        [ "$host_ip" != "$sidecar_ip" ] \
+          || die "host and sidecar public IPs are equal; expected different exits"
+        ;;
+      same)
+        [ "$host_ip" = "$sidecar_ip" ] \
+          || die "host and sidecar public IPs differ; expected the same direct exit"
+        ;;
+    esac
   fi
-  log "path probe passed: host and sidecar exits are distinct"
+  log "path probe passed: host/sidecar exit relation is $SIDECAR_HOST_EXIT_RELATION"
 }
 
 qualified_count() {

@@ -20,8 +20,12 @@ SSH_KNOWN_HOSTS="${CFIP_AUTO_SYNC_KNOWN_HOSTS:-/root/.ssh/known_hosts}"
 
 CFIP_AUTO_SYNC_APPLY="${CFIP_AUTO_SYNC_APPLY:-0}"
 CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
-CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-2}"
-CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-6.5}"
+CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
+CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
+CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
+CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
+CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
+CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY="${CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY:-0}"
 
 TMP_DIR=""
 UPDATE_APPLIED=0
@@ -87,9 +91,14 @@ load_config() {
   CF_ZONE_ID="${CF_ZONE_ID:-}"
   CFIP_AUTO_SYNC_APPLY="${CFIP_AUTO_SYNC_APPLY:-0}"
   CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
-  CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-2}"
-  CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-6.5}"
+  CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
+  CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
+  CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
+  CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
+  CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
+  CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY="${CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY:-0}"
   export CFIP_ROUTER_CANARY_REQUIRED_DAYS="${CFIP_ROUTER_CANARY_REQUIRED_DAYS:-3}"
+  export CFIP_ROUTER_CANARY_MIN_MBPS="$CFIP_AUTO_SYNC_MIN_MBPS"
 
   [ -n "$CF_API_TOKEN" ] || die "Cloudflare token is missing"
   [ -n "$CF_ZONE_ID" ] || die "Cloudflare zone id is missing"
@@ -97,11 +106,19 @@ load_config() {
     || die "CFIP_AUTO_SYNC_APPLY must be 0 or 1"
   [[ "$CFIP_AUTO_SYNC_MAX_CANARIES" =~ ^[0-9]+$ ]] \
     && [ "$CFIP_AUTO_SYNC_MAX_CANARIES" -ge 1 ] \
-    && [ "$CFIP_AUTO_SYNC_MAX_CANARIES" -le 5 ] \
-    || die "CFIP_AUTO_SYNC_MAX_CANARIES must be between 1 and 5"
-  decimal_at_least "$CFIP_AUTO_SYNC_MIN_MBPS" 6.5 \
-    || die "automatic sync threshold cannot be below 6.5 MB/s"
-  [ -n "$CFIP_AUTO_SYNC_RECORDS" ] || die "automatic sync target records are missing"
+    && [ "$CFIP_AUTO_SYNC_MAX_CANARIES" -le 3 ] \
+    || die "CFIP_AUTO_SYNC_MAX_CANARIES must be between 1 and 3"
+  decimal_at_least "$CFIP_AUTO_SYNC_MIN_MBPS" 3.5 \
+    || die "automatic sync threshold cannot be below 3.5 MB/s"
+  decimal_at_least "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" 4.0 \
+    || die "primary promotion threshold cannot be below 4.0 MB/s"
+  [[ "$CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT" =~ ^[0-9]+$ ]] \
+    && [ "$CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT" -ge 25 ] \
+    || die "primary improvement requirement cannot be below 25 percent"
+  [ "$CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY" = 0 ] \
+    || die "primary promotion remains disabled pending three-day acceptance"
+  [ -n "$CFIP_AUTO_SYNC_RECORDS" ] || die "automatic competition records are missing"
+  [ -n "$CFIP_AUTO_SYNC_PRIMARY_RECORDS" ] || die "automatic primary records are missing"
 }
 
 snapshot_xray_pids() {
@@ -154,27 +171,93 @@ run_canaries() {
   done < <(tail -n +2 "$STAGING_FILE")
 }
 
-choose_qualified_candidate() {
+choose_qualified_candidates() {
   local output="$1"
-  [ -s "$QUALIFIED_FILE" ] || return 0
+  [ -s "$QUALIFIED_FILE" ] || { : >"$output"; return 0; }
   awk -F '\t' '
     NR == FNR {if (FNR > 1) current[$4]=1; next}
-    FNR > 1 && current[$1] && $7 == "competition_qualified" {print $1 "\t" $4 "\t" $5}
-  ' "$STAGING_FILE" "$QUALIFIED_FILE" | sort -t $'\t' -k2,2nr -k3,3nr | head -n 1 >"$output"
+    FNR > 1 && current[$1] && $7 == "competition_qualified" {
+      print $1 "\t" $2 "\t" $4 "\t" $5
+    }
+  ' "$STAGING_FILE" "$QUALIFIED_FILE" \
+    | sort -t $'\t' -k3,3nr -k4,4nr -k2,2nr -k1,1 \
+    | head -n 2 >"$output"
 }
 
+record_content() {
+  local records_file="$1" name="$2"
+  awk -F '\t' -v name="$name" '$1 == name {print $2; exit}' "$records_file"
+}
+
+build_competition_targets() {
+  local current_records="$1" qualified="$2" output="$3"
+  local -a competition_names=() primary_names=() challengers=() mins=() avgs=()
+  local name ip days minimum average primary_ip desired source index
+  read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  [ "${#competition_names[@]}" -eq 2 ] || die "exactly two competition records are required"
+  [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
+  local primary1 primary2 primary3
+  primary1="$(record_content "$current_records" "${primary_names[0]}")"
+  primary2="$(record_content "$current_records" "${primary_names[1]}")"
+  primary3="$(record_content "$current_records" "${primary_names[2]}")"
+  [ -n "$primary1" ] && [ -n "$primary2" ] && [ -n "$primary3" ] \
+    || die "cannot resolve all primary record contents"
+
+  while IFS=$'\t' read -r ip days minimum average; do
+    [ -n "$ip" ] || continue
+    case "$ip" in "$primary1"|"$primary2"|"$primary3") continue ;; esac
+    challengers+=("$ip"); mins+=("$minimum"); avgs+=("$average")
+    [ "${#challengers[@]}" -ge 2 ] && break
+  done <"$qualified"
+
+  : >"$output"
+  for index in 0 1; do
+    name="${competition_names[$index]}"
+    if [ "$index" -lt "${#challengers[@]}" ]; then
+      desired="${challengers[$index]}"; minimum="${mins[$index]}"; average="${avgs[$index]}"; source=challenger
+    elif [ "$index" -eq 0 ]; then
+      desired="$primary1"; minimum=""; average=""; source=stable_mirror
+    else
+      desired="$primary2"; minimum=""; average=""; source=stable_mirror
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$desired" "$minimum" "$average" "$source" >>"$output"
+  done
+}
+
+choose_pending_target() {
+  local current_records="$1" targets="$2" output="$3"
+  local name desired minimum average source current
+  : >"$output"
+  while IFS=$'\t' read -r name desired minimum average source; do
+    current="$(record_content "$current_records" "$name")"
+    [ -n "$current" ] || die "cannot determine current competition record content"
+    if [ "$current" != "$desired" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$desired" "$current" "$minimum" "$average" "$source" >"$output"
+      return 0
+    fi
+  done <"$targets"
+}
 validate_target_records() {
   local configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}" target found
+  local -a competition=() primary=()
   [ -n "$configured" ] || die "configured Cloudflare record list is empty"
-  for target in $CFIP_AUTO_SYNC_RECORDS; do
+  read -r -a competition <<<"$CFIP_AUTO_SYNC_RECORDS"
+  read -r -a primary <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  [ "${#competition[@]}" -eq 2 ] || die "exactly two competition records must be configured"
+  [ "${#primary[@]}" -eq 3 ] || die "exactly three primary records must be configured"
+  for target in "${primary[@]}" "${competition[@]}"; do
     found=0
     for record in $(printf '%s\n' "$configured" | tr ', ' '\n\n' | sed '/^$/d'); do
       [ "$target" = "$record" ] && found=1
     done
     [ "$found" -eq 1 ] || die "automatic sync target is outside configured record list: $target"
   done
+  for target in "${primary[@]}"; do
+    case " $CFIP_AUTO_SYNC_RECORDS " in *" $target "*) die "primary and competition records must be disjoint" ;; esac
+  done
 }
-
 collect_current_records() {
   local output="$1" configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}" record response
   : >"$output"
@@ -185,23 +268,10 @@ collect_current_records() {
   done
 }
 
-select_target_record() {
-  local -a records=() candidates=()
-  local record index=0
-  for record in $CFIP_AUTO_SYNC_RECORDS; do records+=("$record"); done
-  [ "${#records[@]}" -gt 0 ] || die "no automatic sync records were configured"
-  if [ -r "$STATE_FILE" ]; then
-    index="$(sed -n 's/^next_index=\([0-9][0-9]*\)$/\1/p' "$STATE_FILE" | tail -n 1)"
-    [[ "$index" =~ ^[0-9]+$ ]] || index=0
-  fi
-  index=$((index % ${#records[@]}))
-  printf '%s\t%s\t%s\n' "${records[$index]}" "$index" "${#records[@]}"
-}
-
 run_sync() {
-  local export_file candidate_file current_records candidate candidate_min candidate_avg
-  local row_count target target_index target_count current_response record_id previous_content
-  local baseline_pids baseline_listeners baseline_passwall verify_response next_index
+  local export_file qualified_file current_records targets pending row_count
+  local target candidate previous_content candidate_min candidate_avg target_source
+  local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response
 
   load_config
   for command in awk bash curl flock jq netstat pidof sha256sum ssh timeout; do need_cmd "$command"; done
@@ -222,43 +292,47 @@ run_sync() {
   TMP_DIR="$(mktemp -d /tmp/cfip-sidecar-auto-sync.XXXXXX)"
   chmod 700 "$TMP_DIR"
   export_file="$TMP_DIR/candidates.tsv"
-  candidate_file="$TMP_DIR/qualified.tsv"
+  qualified_file="$TMP_DIR/qualified.tsv"
   current_records="$TMP_DIR/current-records.tsv"
+  targets="$TMP_DIR/competition-targets.tsv"
+  pending="$TMP_DIR/pending-target.tsv"
 
   pull_export "$export_file"
   "$GATE_SCRIPT" import "$export_file"
   row_count="$(awk 'NR > 1 {count++} END {print count + 0}' "$STAGING_FILE")"
-  if [ "$row_count" -eq 0 ]; then
-    write_report no_candidate "" "" "" sidecar_export_has_no_6.5_MBps_candidate
-    log "sidecar export has no qualified candidate; Cloudflare records preserved"
-    return 0
+  : >"$qualified_file"
+  if [ "$row_count" -gt 0 ]; then
+    run_canaries
+    "$GATE_SCRIPT" qualify >/dev/null
+    choose_qualified_candidates "$qualified_file"
   fi
 
-  run_canaries
-  "$GATE_SCRIPT" qualify >/dev/null
-  choose_qualified_candidate "$candidate_file"
-  if [ ! -s "$candidate_file" ]; then
-    write_report awaiting_multiday_gate "" "" "" candidate_not_yet_qualified_for_competition
-    log "candidate passed export/import processing but has not completed the multi-day router gate"
-    return 0
-  fi
-
-  IFS=$'\t' read -r candidate candidate_min candidate_avg <"$candidate_file"
-  decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_MIN_MBPS" \
-    || die "qualified candidate is below automatic sync threshold"
   collect_current_records "$current_records"
-  if awk -F '\t' -v ip="$candidate" '$2 == ip {found=1} END {exit found ? 0 : 1}' "$current_records"; then
-    write_report already_present "$candidate" "" "" candidate_already_in_auto_records
-    log "qualified candidate is already present in the configured records"
+  build_competition_targets "$current_records" "$qualified_file" "$targets"
+  choose_pending_target "$current_records" "$targets" "$pending"
+  if [ ! -s "$pending" ]; then
+    if [ "$row_count" -eq 0 ]; then
+      write_report no_candidate "" "" "" sidecar_export_has_no_3.5_MBps_observation_candidate
+      log "sidecar export has no observation candidate; competition slots already match stable mirrors"
+    elif [ ! -s "$qualified_file" ]; then
+      write_report awaiting_multiday_gate "" "" "" candidate_not_yet_qualified_for_competition
+      log "observation candidates have not completed the consecutive three-day router gate"
+    else
+      candidate="$(awk -F '\t' 'NR == 1 {print $1}' "$qualified_file")"
+      write_report already_present "$candidate" "" "" competition_slots_already_match_ranked_targets
+      log "competition slots already match the ranked challenger/mirror targets"
+    fi
     return 0
   fi
 
-  IFS=$'\t' read -r target target_index target_count < <(select_target_record)
-  previous_content="$(awk -F '\t' -v name="$target" '$1 == name {print $2; exit}' "$current_records")"
-  [ -n "$previous_content" ] || die "cannot determine current target record content"
+  IFS=$'\t' read -r target candidate previous_content candidate_min candidate_avg target_source <"$pending"
+  if [ "$target_source" = challenger ]; then
+    decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_MIN_MBPS" \
+      || die "qualified challenger is below automatic sync threshold"
+  fi
   if [ "$CFIP_AUTO_SYNC_APPLY" -ne 1 ]; then
-    write_report planned "$candidate" "$target" "$previous_content" apply_disabled
-    log "automatic sync plan ready but apply is disabled"
+    write_report planned "$candidate" "$target" "$previous_content" "source=$target_source"
+    log "competition slot plan ready but apply is disabled"
     return 0
   fi
 
@@ -286,24 +360,25 @@ run_sync() {
     || die "PassWall configuration changed"
   http_gate || die "HTTP gate failed after Cloudflare update"
 
-  next_index=$(((target_index + 1) % target_count))
-  printf 'next_index=%s\nlast_record=%s\nlast_candidate=%s\nupdated_at=%s\n' \
-    "$next_index" "$target" "$candidate" "$(date '+%F %T')" >"$STATE_FILE.tmp.$$"
+  printf 'last_record=%s\nlast_candidate=%s\nlast_source=%s\nupdated_at=%s\n' \
+    "$target" "$candidate" "$target_source" "$(date '+%F %T')" >"$STATE_FILE.tmp.$$"
   chmod 600 "$STATE_FILE.tmp.$$"
   mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"
-  write_report updated "$candidate" "$target" "$previous_content" "min=${candidate_min}_avg=${candidate_avg}"
+  write_report updated "$candidate" "$target" "$previous_content" \
+    "source=${target_source}_min=${candidate_min:-n/a}_avg=${candidate_avg:-n/a}"
   UPDATE_APPLIED=0
-  log "Cloudflare automatic sync complete: record=$target; PassWall was not stopped or restarted"
+  log "Cloudflare competition slot sync complete: record=$target; PassWall was not stopped or restarted"
 }
-
 status_command() {
   [ -r "$AUTO_CONFIG_FILE" ] && echo auto_config=present || echo auto_config=missing
   [ -r "$REPORT_FILE" ] && tail -n 1 "$REPORT_FILE" || echo report=missing
   (crontab -l 2>/dev/null || true) | grep -F "$APP_DIR/sidecar-auto-sync.sh" || true
 }
 
-case "${1:-run}" in
-  run) run_sync ;;
-  status) status_command ;;
-  *) echo "Usage: $0 {run|status}" >&2; exit 2 ;;
-esac
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-run}" in
+    run) run_sync ;;
+    status) status_command ;;
+    *) echo "Usage: $0 {run|status}" >&2; exit 2 ;;
+  esac
+fi

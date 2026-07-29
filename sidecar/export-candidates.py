@@ -15,10 +15,13 @@ SOURCE_FIELDS = [
 ]
 EXPORT_FIELDS = [
     "schema_version", "exported_epoch", "observed_at", "candidate_ip", "direct_MBps",
-    "round1_MBps", "round2_MBps", "min_MBps", "avg_MBps", "http1", "http2", "status", "path_mode",
+    "round1_MBps", "round2_MBps", "min_MBps", "avg_MBps", "http1", "http2", "status",
+    "path_mode", "candidate_tier",
 ]
-SCHEMA_VERSION = "cfip-sidecar-candidates-v1"
-HARD_MIN_MBPS = Decimal("6.5")
+SCHEMA_VERSION = "cfip-sidecar-candidates-v2"
+HARD_OBSERVATION_MIN_MBPS = Decimal("3.5")
+HARD_EXCELLENT_MIN_MBPS = Decimal("6.5")
+MAX_EXPORT_ROWS = 3
 MAX_SOURCE_BYTES = 1024 * 1024
 MAX_SOURCE_ROWS = 100
 CLOUDFLARE_V4 = tuple(ipaddress.ip_network(cidr) for cidr in (
@@ -57,18 +60,33 @@ def validate_row(row: dict[str, str], line_number: int) -> None:
         raise ValueError(f"line {line_number}: invalid path mode")
 
 
-def qualified(row: dict[str, str], min_mbps: Decimal) -> bool:
+def exportable(row: dict[str, str], min_mbps: Decimal) -> bool:
     return (
-        row["status"] == "pass"
-        and row["http1"] == "200"
+        row["http1"] == "200"
         and row["http2"] == "200"
         and parse_decimal(row["min_MBps"], "min_MBps") >= min_mbps
     )
 
 
-def export_candidates(source: Path, destination: Path, min_mbps: Decimal) -> int:
-    if min_mbps < HARD_MIN_MBPS:
-        raise ValueError(f"minimum speed cannot be below {HARD_MIN_MBPS} MB/s")
+def export_candidates(
+    source: Path,
+    destination: Path,
+    min_mbps: Decimal,
+    excellent_min_mbps: Decimal,
+    limit: int,
+) -> int:
+    if min_mbps < HARD_OBSERVATION_MIN_MBPS:
+        raise ValueError(
+            f"observation minimum cannot be below {HARD_OBSERVATION_MIN_MBPS} MB/s"
+        )
+    if excellent_min_mbps < HARD_EXCELLENT_MIN_MBPS:
+        raise ValueError(
+            f"excellent minimum cannot be below {HARD_EXCELLENT_MIN_MBPS} MB/s"
+        )
+    if excellent_min_mbps < min_mbps:
+        raise ValueError("excellent minimum cannot be below observation minimum")
+    if limit < 1 or limit > MAX_EXPORT_ROWS:
+        raise ValueError(f"export limit must be between 1 and {MAX_EXPORT_ROWS}")
     if not source.is_file() or source.stat().st_size > MAX_SOURCE_BYTES:
         raise ValueError("source report is missing or too large")
 
@@ -82,14 +100,30 @@ def export_candidates(source: Path, destination: Path, min_mbps: Decimal) -> int
             if index - 1 > MAX_SOURCE_ROWS:
                 raise ValueError("source report has too many rows")
             validate_row(row, index)
-            if qualified(row, min_mbps):
+            if exportable(row, min_mbps):
+                minimum = parse_decimal(row["min_MBps"], "min_MBps")
                 rows.append(
                     {
                         "schema_version": SCHEMA_VERSION,
                         "exported_epoch": exported_epoch,
-                        **{field: row[field] for field in EXPORT_FIELDS[2:]},
+                        **{field: row[field] for field in EXPORT_FIELDS[2:-1]},
+                        "status": (
+                            "pass" if minimum >= excellent_min_mbps else "low"
+                        ),
+                        "candidate_tier": (
+                            "excellent" if minimum >= excellent_min_mbps else "observation"
+                        ),
                     }
                 )
+
+    rows.sort(
+        key=lambda row: (
+            -parse_decimal(row["min_MBps"], "min_MBps"),
+            -parse_decimal(row["avg_MBps"], "avg_MBps"),
+            ipaddress.ip_address(row["candidate_ip"]),
+        )
+    )
+    rows = rows[:limit]
 
     destination.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     os.chmod(destination.parent, 0o755)
@@ -126,9 +160,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Export sanitized, qualified CFIP Sidecar candidates")
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--destination", required=True, type=Path)
-    parser.add_argument("--min-mbps", default=str(HARD_MIN_MBPS), type=Decimal)
+    parser.add_argument(
+        "--min-mbps", default=str(HARD_OBSERVATION_MIN_MBPS), type=Decimal
+    )
+    parser.add_argument(
+        "--excellent-min-mbps", default=str(HARD_EXCELLENT_MIN_MBPS), type=Decimal
+    )
+    parser.add_argument("--limit", default=MAX_EXPORT_ROWS, type=int)
     args = parser.parse_args()
-    count = export_candidates(args.source, args.destination, args.min_mbps)
+    count = export_candidates(
+        args.source,
+        args.destination,
+        args.min_mbps,
+        args.excellent_min_mbps,
+        args.limit,
+    )
     print(f"exported_candidates={count}")
     return 0
 

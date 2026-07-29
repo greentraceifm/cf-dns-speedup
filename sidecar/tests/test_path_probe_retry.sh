@@ -85,8 +85,27 @@ host_public_ip_probe_once() {
 sidecar_public_ip_probe_once() {
   printf 'ip=203.0.113.10\n'
 }
+SIDECAR_HOST_EXIT_RELATION=different
 if (trap - EXIT; network_probe >/dev/null 2>&1); then
   echo "matching host and Sidecar exits must remain fail-closed" >&2
+  exit 1
+fi
+
+SIDECAR_HOST_EXIT_RELATION=same
+(trap - EXIT; network_probe >/dev/null 2>&1) \
+  || { echo "matching host and Sidecar exits should pass in same mode" >&2; exit 1; }
+
+sidecar_public_ip_probe_once() {
+  printf 'ip=203.0.113.11\n'
+}
+if (trap - EXIT; network_probe >/dev/null 2>&1); then
+  echo "different host and Sidecar exits must fail in same mode" >&2
+  exit 1
+fi
+
+SIDECAR_HOST_EXIT_RELATION=invalid
+if (validate_path_probe_settings); then
+  echo "invalid host exit relation should be rejected" >&2
   exit 1
 fi
 

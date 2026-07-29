@@ -9,9 +9,12 @@ STAGING_DIR="${CFIP_CANDIDATE_STAGING_DIR:-$APP_DIR/candidate-staging}"
 STAGING_FILE="$STAGING_DIR/sidecar-candidates.latest.tsv"
 IMPORT_REPORT_FILE="$STAGING_DIR/import.latest.tsv"
 LOCK_FILE="${CFIP_CANDIDATE_GATE_LOCK:-/tmp/cfip-candidate-gate.lock}"
-SCHEMA_VERSION="cfip-sidecar-candidates-v1"
-EXPECTED_HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
-HARD_MIN_MBPS="6.5"
+SCHEMA_VERSION_V1="cfip-sidecar-candidates-v1"
+SCHEMA_VERSION_V2="cfip-sidecar-candidates-v2"
+EXPECTED_HEADER_V1=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
+EXPECTED_HEADER_V2=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode\tcandidate_tier'
+HARD_OBSERVATION_MIN_MBPS="3.5"
+HARD_EXCELLENT_MIN_MBPS="6.5"
 MAX_FILE_BYTES="65536"
 MAX_CANDIDATES="5"
 XRAY_BIN="${CFIP_ROUTER_CANARY_XRAY_BIN:-/usr/bin/xray}"
@@ -52,13 +55,13 @@ need_cmd() {
 load_config() {
   [ ! -r "$CONFIG_FILE" ] || . "$CONFIG_FILE"
   CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS="${CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS:-172800}"
-  CFIP_ROUTER_CANARY_MIN_MBPS="${CFIP_ROUTER_CANARY_MIN_MBPS:-$HARD_MIN_MBPS}"
+  CFIP_ROUTER_CANARY_MIN_MBPS="${CFIP_ROUTER_CANARY_MIN_MBPS:-$HARD_OBSERVATION_MIN_MBPS}"
   [[ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] \
     && [ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" -gt 0 ] \
     && [ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" -le 604800 ] \
     || die "candidate export max age must be between 1 and 604800 seconds"
-  decimal_at_least "$CFIP_ROUTER_CANARY_MIN_MBPS" "$HARD_MIN_MBPS" \
-    || die "router canary threshold cannot be below $HARD_MIN_MBPS MB/s"
+  decimal_at_least "$CFIP_ROUTER_CANARY_MIN_MBPS" "$HARD_OBSERVATION_MIN_MBPS" \
+    || die "router canary threshold cannot be below $HARD_OBSERVATION_MIN_MBPS MB/s"
   [[ "$CANARY_PORT" =~ ^[0-9]+$ ]] && [ "$CANARY_PORT" -ge 1024 ] && [ "$CANARY_PORT" -le 65535 ] \
     || die "router canary port is invalid"
   [ "$CANARY_ROUNDS" = "2" ] || die "router canary requires exactly two rounds"
@@ -168,7 +171,7 @@ cleanup_canary() {
       kill "$CANARY_PID" 2>/dev/null || true
       for _ in 1 2 3 4 5 6 7 8 9 10; do
         kill -0 "$CANARY_PID" 2>/dev/null || break
-        sleep 0.2
+        sleep 1
       done
       if kill -0 "$CANARY_PID" 2>/dev/null; then
         command_line="$(tr '\000' ' ' < "/proc/$CANARY_PID/cmdline" 2>/dev/null || true)"
@@ -178,7 +181,7 @@ cleanup_canary() {
           kill -KILL "$CANARY_PID" 2>/dev/null || true
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             kill -0 "$CANARY_PID" 2>/dev/null || break
-            sleep 0.1
+            sleep 1
           done
           kill -0 "$CANARY_PID" 2>/dev/null && CANARY_CLEANUP_FAILURE=1
         else
@@ -236,7 +239,7 @@ start_canary() {
       '$4 ~ port "$" && $7 ~ pid "/xray" {found=1} END {exit found ? 0 : 1}'; then
       return 0
     fi
-    sleep 0.5
+    sleep 1
   done
   die "isolated Xray did not open its private SOCKS port"
 }
@@ -260,24 +263,44 @@ refresh_competition_qualified() {
   awk -F '\t' -v required="$CANARY_REQUIRED_DAYS" -v minimum="$CFIP_ROUTER_CANARY_MIN_MBPS" \
       -v min_bytes="$CANARY_MIN_BYTES" -v now="$(date +%s)" \
       -v max_age="$CANARY_QUALIFICATION_MAX_AGE_SECONDS" '
+    function reset_streak(ip) {
+      streak[ip]=0; streak_exports[ip]=0; streak_min[ip]=""; streak_avg_sum[ip]=0; streak_rows[ip]=0
+    }
+    function finalize_day(ip) {
+      if (day_date[ip] == "") return
+      if (day_ok[ip] && day_rows[ip] > 0 && day_min[ip] >= minimum) {
+        streak[ip]++
+        streak_exports[ip] += day_exports[ip]
+        if (streak_min[ip] == "" || day_min[ip] < streak_min[ip]) streak_min[ip]=day_min[ip]
+        streak_avg_sum[ip] += day_avg_sum[ip]
+        streak_rows[ip] += day_rows[ip]
+        latest[ip]=day_latest[ip]
+      } else reset_streak(ip)
+      day_date[ip]=""; day_ok[ip]=1; day_rows[ip]=0; day_min[ip]=""; day_avg_sum[ip]=0; day_exports[ip]=0
+    }
     NR == 1 {next}
-    $12 == "pass" && $8 == "200" && $9 == "200" && ($6 + 0) >= minimum \
-      && ($10 + 0) >= min_bytes && ($11 + 0) >= min_bytes \
-      && ($3 + 0) <= now + 300 && now - ($3 + 0) <= max_age {
-      date = substr($1, 1, 10)
-      key = $2 SUBSEP date
-      if (!seen[key]++) days[$2]++
-      source_key = $2 SUBSEP $3
-      if (!source_seen[source_key]++) exports[$2]++
-      if (!(latest[$2] != "" && latest[$2] >= $1)) {
-        latest[$2] = $1; latest_min[$2] = $6; latest_avg[$2] = $7
-      }
+    ($3 + 0) <= now + 300 && now - ($3 + 0) <= max_age {
+      ip=$2; date=substr($1, 1, 10); ips[ip]=1
+      if (day_date[ip] != "" && day_date[ip] != date) finalize_day(ip)
+      if (day_date[ip] == "") {day_date[ip]=date; day_ok[ip]=1}
+      row_ok=($12 == "pass" && $8 == "200" && $9 == "200" && ($6 + 0) >= minimum \
+        && ($10 + 0) >= min_bytes && ($11 + 0) >= min_bytes)
+      if (!row_ok) day_ok[ip]=0
+      day_rows[ip]++
+      if (day_min[ip] == "" || ($6 + 0) < day_min[ip]) day_min[ip]=$6+0
+      day_avg_sum[ip]+=$7+0
+      day_latest[ip]=$1
+      source_key=ip SUBSEP date SUBSEP $3
+      if (!source_seen[source_key]++) day_exports[ip]++
     }
     END {
-      print "candidate_ip\tpass_days\tpass_exports\tlatest_min_MBps\tlatest_avg_MBps\tlast_observed_at\tstatus\tpath_mode"
-      for (ip in days)
-        if (days[ip] >= required && exports[ip] >= required)
-          print ip "\t" days[ip] "\t" exports[ip] "\t" latest_min[ip] "\t" latest_avg[ip] "\t" latest[ip] "\tcompetition_qualified\trouter_isolated_xray"
+      print "candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode"
+      for (ip in ips) {
+        finalize_day(ip)
+        if (streak[ip] >= required && streak_exports[ip] >= required && streak_rows[ip] > 0)
+          printf "%s\t%d\t%d\t%.2f\t%.2f\t%s\tcompetition_qualified\trouter_isolated_xray\n", \
+            ip, streak[ip], streak_exports[ip], streak_min[ip], streak_avg_sum[ip] / streak_rows[ip], latest[ip]
+      }
     }
   ' "$CANARY_HISTORY_FILE" 2>/dev/null > "$temporary" || {
     rm -f "$temporary"
@@ -286,7 +309,6 @@ refresh_competition_qualified() {
   chmod 600 "$temporary"
   mv -f "$temporary" "$CANARY_QUALIFIED_FILE"
 }
-
 canary_candidate() {
   local requested="${1:-}" candidate proxy_tag baseline_pids baseline_listeners
   local baseline_config_sha baseline_runtime_sha baseline_staging_sha after_pids after_listeners source_epoch
@@ -438,8 +460,8 @@ is_cloudflare_ipv4() {
 }
 
 validate_export_file() {
-  local source="$1" size header now epoch observed ip direct round1 round2 minimum average
-  local http1 http2 status path extra line_count first_epoch="" invalid_bytes
+  local source="$1" size header schema expected_fields now epoch observed ip direct round1 round2 minimum average
+  local http1 http2 status path tier extra line_count row_limit first_epoch="" invalid_bytes
   declare -A seen=()
 
   [ -f "$source" ] && [ ! -L "$source" ] || die "candidate export must be a regular non-symlink file"
@@ -454,17 +476,22 @@ validate_export_file() {
   [ "$(tail -c 1 "$source" | tr -d '\n' | wc -c | tr -d ' ')" = "0" ] \
     || die "candidate export must end with a newline"
   header="$(sed -n '1p' "$source")"
-  [ "$header" = "$EXPECTED_HEADER" ] || die "candidate export header or schema contract is invalid"
-  awk -F '\t' 'NF != 13 {exit 1}' "$source" || die "candidate export has an invalid field count"
+  case "$header" in
+    "$EXPECTED_HEADER_V1") schema="$SCHEMA_VERSION_V1"; expected_fields=13; row_limit="$MAX_CANDIDATES" ;;
+    "$EXPECTED_HEADER_V2") schema="$SCHEMA_VERSION_V2"; expected_fields=14; row_limit=3 ;;
+    *) die "candidate export header or schema contract is invalid" ;;
+  esac
+  awk -F '\t' -v expected="$expected_fields" 'NF != expected {exit 1}' "$source" \
+    || die "candidate export has an invalid field count"
   line_count="$(wc -l < "$source" | tr -d ' ')"
-  [ "$line_count" -le "$((MAX_CANDIDATES + 1))" ] || die "candidate export has too many rows"
+  [ "$line_count" -le "$((row_limit + 1))" ] || die "candidate export has too many rows"
 
   now="$(date +%s)"
   VALIDATED_COUNT=0
   VALIDATED_EPOCH=0
-  while IFS=$'\t' read -r _schema epoch observed ip direct round1 round2 minimum average \
-      http1 http2 status path extra; do
-    [ "$_schema" = "$SCHEMA_VERSION" ] || die "candidate row schema version is invalid"
+  while IFS=$'\t' read -r row_schema epoch observed ip direct round1 round2 minimum average \
+      http1 http2 status path tier extra; do
+    [ "$row_schema" = "$schema" ] || die "candidate row schema version is invalid"
     [[ "$epoch" =~ ^[0-9]{10}$ ]] || die "candidate export epoch is invalid"
     [ "$epoch" -le "$((now + 300))" ] || die "candidate export epoch is in the future"
     [ "$((now - epoch))" -le "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" ] \
@@ -479,8 +506,6 @@ validate_export_file() {
     decimal_value "$direct" && decimal_value "$round1" && decimal_value "$round2" \
       && decimal_value "$minimum" && decimal_value "$average" \
       || die "candidate speed fields are invalid"
-    decimal_at_least "$minimum" "$HARD_MIN_MBPS" \
-      || die "candidate is below the hard $HARD_MIN_MBPS MB/s threshold"
     awk -v a="$round1" -v b="$round2" -v m="$minimum" -v avg="$average" '
       BEGIN {
         expected_min = a < b ? a : b
@@ -492,15 +517,29 @@ validate_export_file() {
     ' || die "candidate min/average values are inconsistent"
     [ "$http1" = "200" ] && [ "$http2" = "200" ] \
       || die "candidate did not pass both HTTP rounds"
-    [ "$status" = "pass" ] && [ "$path" = "sidecar_proxy" ] \
-      || die "candidate status or path mode is invalid"
+    [ "$path" = "sidecar_proxy" ] || die "candidate path mode is invalid"
+    if [ "$schema" = "$SCHEMA_VERSION_V1" ]; then
+      decimal_at_least "$minimum" "$HARD_EXCELLENT_MIN_MBPS" \
+        || die "v1 candidate is below the hard $HARD_EXCELLENT_MIN_MBPS MB/s threshold"
+      [ "$status" = "pass" ] && [ -z "${tier:-}" ] \
+        || die "v1 candidate status is invalid"
+    else
+      decimal_at_least "$minimum" "$HARD_OBSERVATION_MIN_MBPS" \
+        || die "v2 candidate is below the hard $HARD_OBSERVATION_MIN_MBPS MB/s threshold"
+      if decimal_at_least "$minimum" "$HARD_EXCELLENT_MIN_MBPS"; then
+        [ "$tier" = "excellent" ] && [ "$status" = "pass" ] \
+          || die "v2 excellent candidate classification is inconsistent"
+      else
+        [ "$tier" = "observation" ] && [ "$status" = "low" ] \
+          || die "v2 observation candidate classification is inconsistent"
+      fi
+    fi
     [ -z "${extra:-}" ] || die "candidate row contains extra fields"
     VALIDATED_COUNT=$((VALIDATED_COUNT + 1))
   done < <(tail -n +2 "$source")
-  [ "$VALIDATED_COUNT" -le "$MAX_CANDIDATES" ] || die "candidate export exceeds the row limit"
+  [ "$VALIDATED_COUNT" -le "$row_limit" ] || die "candidate export exceeds the row limit"
   [ -z "$first_epoch" ] || VALIDATED_EPOCH="$first_epoch"
 }
-
 acquire_lock() {
   need_cmd flock
   exec 9>"$LOCK_FILE"
