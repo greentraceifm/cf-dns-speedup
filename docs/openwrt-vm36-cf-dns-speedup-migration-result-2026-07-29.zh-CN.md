@@ -35,6 +35,7 @@ VM33 的 `/root/cf-dns-speedup` 已完成分层迁移。VM36 已建立活动目�
 - 当前代码本地及 VM36 回归测试全部通过；
 - shell 语法、`cfst` x86_64 离线帮助命令通过；
 - Cloudflare Token、Zone、DNS GET 验证通过；对 `auto4` 当前内容执行一次幂等 PATCH 后，API 内容、三路 DNS、PassWall PID/监听及 Google/YouTube HTTP 均保持不变，确认写权限和回滚所需写路径可用；
+- 一次 APPLY=1 空候选复验在同步开始前的 Cloudflare 摘要 GET 阶段遇到瞬时 pi.cloudflare.com DNS 解析失败，未进入同步、未发生写入；随后五条记录只读 GET 和 .110 导出复核均恢复通过，此项保留为下一自然周期观察点；
 - VM36 自动同步脚本 SHA256 为 `569ba4c4c8d8b9f3a540206c1fc9a883e172d91d96f51a6562e466beae12f857`，独立写开关已启用，04:15 cron 唯一存在；
 - VM36 到 `.110` 使用专用受限密钥，服务端强制命令只能读取候选导出文件，禁止交互 shell、PTY 和端口转发；
 - `health-check` 和 `passwall-node-topology` 只读命令通过；
