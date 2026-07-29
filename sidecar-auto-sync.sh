@@ -89,6 +89,7 @@ load_config() {
   CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
   CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-2}"
   CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-6.5}"
+  export CFIP_ROUTER_CANARY_REQUIRED_DAYS="${CFIP_ROUTER_CANARY_REQUIRED_DAYS:-3}"
 
   [ -n "$CF_API_TOKEN" ] || die "Cloudflare token is missing"
   [ -n "$CF_ZONE_ID" ] || die "Cloudflare zone id is missing"
@@ -135,8 +136,9 @@ pull_export() {
   local destination="$1"
   [ -f "$SSH_KEY" ] && [ ! -L "$SSH_KEY" ] || die "sidecar pull key is missing"
   [ -f "$SSH_KNOWN_HOSTS" ] || die "SSH known_hosts is missing"
-  ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=8 \
-    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SSH_KNOWN_HOSTS" \
+  [ "$SSH_KNOWN_HOSTS" = /root/.ssh/known_hosts ] \
+    || die "Dropbear requires the default SSH known_hosts path"
+  timeout 15 ssh -i "$SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=yes \
     "$REMOTE_HOST" "$REMOTE_COMMAND" >"$destination"
   [ -s "$destination" ] || die "sidecar export is empty"
   [ "$(wc -c <"$destination")" -le 65536 ] || die "sidecar export is too large"
