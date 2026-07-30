@@ -107,3 +107,46 @@ VM36 没有 GNU `install` 命令。部署辅助流程改为同目录临时文件
 - 每周期最多更新 `auto3/auto4` 中一条记录；
 - `auto/auto1/auto2` 主槽自动晋升继续关闭；
 - Cloudflare API、HTTP、PassWall或清理检查失败时保持 fail-closed。
+## 2026-07-30 早间自动任务排查与修复
+
+### 运行结论
+
+04:15 自动任务的测速阶段顺利完成，但整轮同步未完整成功：
+
+- 从 .110 导入 3 个 v2 观察候选；
+- VM36 隔离 Xray 的两轮真实 PassWall 测速全部为 HTTP 200、20 MiB 完整下载；
+- 104.17.140.148：4.45 / 4.04 MB/s，最低 4.04 MB/s；
+- 104.17.147.56：4.48 / 4.26 MB/s，最低 4.26 MB/s；
+- 104.17.134.73：4.43 / 4.43 MB/s，最低 4.43 MB/s；
+- 三个候选均写入门控历史，但尚未满足连续 3 个不同日期，因此合格竞争候选仍为 0；
+- 随后的 Cloudflare 只读 GET 因 api.cloudflare.com 一次 DNS 解析失败而终止；
+- 系统按设计 fail-closed，auto..auto4 均未更新。
+
+排查时 127.0.0.1、192.168.1.1、1.1.1.1 对 api.cloudflare.com 的解析均已恢复，Cloudflare 只读 API 正常。未发现持续性的 dnsmasq、路由或配置损坏，结论为短暂 DNS/传输故障。
+
+### 最小修复
+
+sidecar-auto-sync.sh 的 Cloudflare 请求增加以下保护：
+
+- 仅对传输失败以及 HTTP 408、429、500、502、503、504 做有限重试；
+- 总尝试次数固定为 3 次，重试间隔 2 秒；
+- 401、403 等非瞬态错误不重试；
+- 请求最终失败后立即返回，不再调用 jq 读取不存在的响应文件；
+- 保留原有 fail-closed、单记录更新和失败回滚语义。
+
+针对性测试模拟前两次传输失败、第三次恢复，并验证失败后不会继续调用 jq。针对性测试和全项目回归均通过。
+
+### 部署与验收
+
+- VM36 生产脚本 SHA256：f9dfacfa604f067d4ceb4057c9e354f59d2e5c5e8025378bb6c49d292fa28ec7；
+- root-only 回滚点：/root/openwrt-backup/cfip-cloudflare-retry-20260730-094223；
+- 未手动重跑 Sidecar 或 VM36 测速；
+- CFIP_AUTO_SYNC_APPLY=1，竞争槽同步保持启用；
+- CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY=0，主槽自动晋升继续关闭；
+- cron 仍为每日 04:15，每周期最多更新 auto3/auto4 一条；
+- Cloudflare 五记录与启用前基线完全一致；
+- auto..auto4 在 192.168.1.1、192.168.1.254、1.1.1.1 三路 DNS 清单 SHA256 一致；
+- VM36 PassWall enabled，1070/1041/11400/15353 监听正常，dnsmasq 正常，所有项目锁空闲；
+- .110 Sidecar timer active/enabled，服务自然 inactive、Result=success、ExecMainStatus=0，锁空闲且无 Xray JSON 残留；
+- .110 四个既有容器健康、cfip-direct 附着为 0、Ollama idle；
+- PC、.110、.140、VM36 的 Google/YouTube 均为 HTTP 204。

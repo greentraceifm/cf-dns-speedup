@@ -76,4 +76,34 @@ if (AUTO_CONFIG_FILE="$TEST_TMP/below-floor.env" load_config >/dev/null 2>&1); t
   echo "competition threshold below 3.5 MB/s was accepted" >&2; exit 1
 fi
 
+CF_API_TOKEN=dummy
+CF_ZONE_ID=dummy
+CF_REQUEST_TEST_OUTPUT="$TEST_TMP/cf-response.json"
+CF_REQUEST_TEST_COUNTER="$TEST_TMP/curl-attempts"
+: >"$CF_REQUEST_TEST_COUNTER"
+curl() {
+  local attempts
+  cat >/dev/null
+  printf 'x\n' >>"$CF_REQUEST_TEST_COUNTER"
+  attempts="$(wc -l <"$CF_REQUEST_TEST_COUNTER")"
+  if [ "$attempts" -lt 3 ]; then
+    return 6
+  fi
+  printf '{"success":true,"result":[{"content":"104.17.1.10"}]}\n' >"$CF_REQUEST_TEST_OUTPUT"
+  printf '200'
+}
+sleep() { :; }
+cf_get_record auto.example.test "$CF_REQUEST_TEST_OUTPUT"
+[ "$(wc -l <"$CF_REQUEST_TEST_COUNTER")" -eq 3 ] \
+  || { echo "Cloudflare transport retry count is wrong" >&2; exit 1; }
+
+CF_REQUEST_TEST_JQ_MARKER="$TEST_TMP/jq-after-failure"
+cf_request() { return 1; }
+jq() { : >"$CF_REQUEST_TEST_JQ_MARKER"; return 0; }
+if cf_get_record auto.example.test "$TEST_TMP/missing-response.json"; then
+  echo "Cloudflare GET failure was not propagated" >&2; exit 1
+fi
+[ ! -e "$CF_REQUEST_TEST_JQ_MARKER" ] \
+  || { echo "jq ran after a failed Cloudflare request" >&2; exit 1; }
+
 echo "sidecar auto sync plan test passed"

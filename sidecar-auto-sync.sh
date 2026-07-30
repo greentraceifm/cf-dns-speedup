@@ -44,28 +44,42 @@ decimal_at_least() {
 }
 
 cf_request() {
-  local method="$1" url="$2" output="$3" payload="${4:-}" status
-  if [ -n "$payload" ]; then
-    status="$(printf 'silent\nshow-error\nrequest = "%s"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\nurl = "%s"\noutput = "%s"\nwrite-out = "%%{http_code}"\n' \
-      "$method" "$CF_API_TOKEN" "$url" "$output" | curl --config - --data-binary "@$payload")"
-  else
-    status="$(printf 'silent\nshow-error\nrequest = "%s"\nheader = "Authorization: Bearer %s"\nurl = "%s"\noutput = "%s"\nwrite-out = "%%{http_code}"\n' \
-      "$method" "$CF_API_TOKEN" "$url" "$output" | curl --config -)"
-  fi
-  [ "$status" = 200 ] || return 1
-  jq -e '.success == true' "$output" >/dev/null
+  local method="$1" url="$2" output="$3" payload="${4:-}" status attempt=1
+  while [ "$attempt" -le 3 ]; do
+    rm -f "$output"
+    status=""
+    if [ -n "$payload" ]; then
+      status="$(printf 'silent\nshow-error\nrequest = "%s"\nheader = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\nurl = "%s"\noutput = "%s"\nwrite-out = "%%{http_code}"\n' \
+        "$method" "$CF_API_TOKEN" "$url" "$output" | curl --config - --data-binary "@$payload")" || status=""
+    else
+      status="$(printf 'silent\nshow-error\nrequest = "%s"\nheader = "Authorization: Bearer %s"\nurl = "%s"\noutput = "%s"\nwrite-out = "%%{http_code}"\n' \
+        "$method" "$CF_API_TOKEN" "$url" "$output" | curl --config -)" || status=""
+    fi
+    if [ "$status" = 200 ] && jq -e '.success == true' "$output" >/dev/null 2>&1; then
+      return 0
+    fi
+    case "$status" in
+      ""|408|429|500|502|503|504) ;;
+      *) return 1 ;;
+    esac
+    [ "$attempt" -lt 3 ] || return 1
+    log "Cloudflare API request failed; retrying ($attempt/3)" >&2
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  return 1
 }
 
 cf_get_record() {
   local name="$1" output="$2"
-  cf_request GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name" "$output"
+  cf_request GET "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records?type=A&name=$name" "$output" || return 1
   jq -e '.result | length == 1' "$output" >/dev/null
 }
 
 cf_patch_content() {
   local record_id="$1" content="$2" output="$3" payload="$TMP_DIR/payload.json"
   jq -n --arg content "$content" '{content: $content}' >"$payload"
-  cf_request PATCH "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" "$output" "$payload"
+  cf_request PATCH "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/dns_records/$record_id" "$output" "$payload" || return 1
   jq -e --arg content "$content" '.result.content == $content' "$output" >/dev/null
 }
 
