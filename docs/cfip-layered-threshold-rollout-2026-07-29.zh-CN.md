@@ -4,7 +4,7 @@
 
 分层候选协议、三日真实 PassWall 门控和竞争槽规划已部署并完成一次全链路 dry-run。当前状态为 `awaiting_multiday_gate`，Cloudflare 五条记录未改变。
 
-生产写开关仍为 `CFIP_AUTO_SYNC_APPLY=0`，稳定主槽晋升保持 `CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY=0`。启用竞争槽自动写入属于单独的 Cloudflare Action Gate，必须另行明确授权。
+2026-07-30 09:00 CST，用户完成单独的 Cloudflare Action Gate 授权后，竞争槽写开关已设为 `CFIP_AUTO_SYNC_APPLY=1`。稳定主槽晋升继续保持 `CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY=0`。
 
 ## 当前架构
 
@@ -77,6 +77,7 @@ VM36 没有 GNU `install` 命令。部署辅助流程改为同目录临时文件
 - `.110`：`/var/backups/cfip-sidecar/layered-export-host-relation-20260729-132306`
 - VM36 消费端：`/root/openwrt-backup/cfip-layered-consumer-20260729-211825`
 - VM36 BusyBox 修复：`/root/openwrt-backup/cfip-busybox-sleep-20260729-221420`
+- VM36 竞争槽写开关：`/root/openwrt-backup/cfip-enable-competition-sync-20260730-090026`
 
 项目级回滚可恢复上述脚本和配置备份，不需要重启 PassWall。网络级最终回滚仍为关闭 VM36 后启动 VM33，两台不得同时占用 `.254`。
 
@@ -90,7 +91,7 @@ VM36 没有 GNU `install` 命令。部署辅助流程改为同目录临时文件
 - `auto..auto4` 在 `192.168.1.1`、`192.168.1.254`、`1.1.1.1` 三个 DNS 视图一致。
 - Cloudflare API 已只读复核，五记录与实施前一致。
 
-## 下一 Action Gate
+## 2026-07-30 Action Gate 收口
 
 现有 cron 为每日 04:15，晚于 `.110` 的自然 Sidecar 周期：
 
@@ -98,4 +99,11 @@ VM36 没有 GNU `install` 命令。部署辅助流程改为同目录临时文件
 15 4 * * * timeout 1800 /root/cf-dns-speedup/sidecar-auto-sync.sh run
 ```
 
-下一步仅将 `CFIP_AUTO_SYNC_APPLY=0` 改为 `1`。该动作不会立即写 DNS；只有同一候选连续 3 个不同日期通过真实 PassWall 门控后，才允许每周期最多更新一条 `auto3/auto4`。主槽自动晋升继续保持关闭。
+今晨 04:15 的自动任务成功导入并测试 3 个新候选，真实 PassWall 最低速度分别为 4.04、4.26、4.43 MB/s。随后 VM36 当时无法解析 `api.cloudflare.com`，任务按设计 fail-closed，日志明确记录错误，Cloudflare 未发生写入；稍后只读 API 复核已恢复正常。
+
+启用写开关前确认三日合格文件为 0 行，没有候选具备写权限。开关变更没有立即运行同步任务，Cloudflare 五记录和三路 DNS 均保持原值。当前规则为：
+
+- 只有同一候选连续 3 个不同日期通过真实 PassWall 门控，才允许进入竞争槽；
+- 每周期最多更新 `auto3/auto4` 中一条记录；
+- `auto/auto1/auto2` 主槽自动晋升继续关闭；
+- Cloudflare API、HTTP、PassWall或清理检查失败时保持 fail-closed。
