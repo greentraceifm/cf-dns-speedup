@@ -14,6 +14,9 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 # shellcheck source=/dev/null
 . "$ROOT/cfip-sidecar.sh"
 
+[ "$SIDECAR_REQUIRED_CONTAINERS" = "sub2api sub2api-postgres sub2api-redis" ] \
+  || { echo "unexpected default required-container contract" >&2; exit 1; }
+
 NETWORK_MODE=l2
 network_json() {
   printf '[{"Driver":"ipvlan","Options":{"parent":"ens160","ipvlan_mode":"%s"},"IPAM":{"Config":[{"Subnet":"192.168.1.0/24","Gateway":"192.168.1.254"}]}}]\n' "$NETWORK_MODE"

@@ -59,3 +59,32 @@ VM36 缺少独立 `stat` 命令属于 BusyBox applet 差异；已使用 `ls` 完
 项目级回滚先删除 VM36 crontab 中唯一的 `sidecar-auto-sync.sh` 行，再将 `/root/cf-dns-speedup` 改名隔离；不需要重启 PassWall。部署备份保存在 VM36 的 `/root/openwrt-backup/cfip-auto-sync-<时间戳>`。
 
 网络级最终回滚保持不变：关闭 VM36，再启动 VM33；两台虚拟机不得同时占用 `192.168.1.254`。
+
+## 2026-07-30 Sidecar 自然周期故障修复
+
+### 故障结论
+
+- `.110` 最新自然 Sidecar 在扫描和测速前安全退出，错误为 `required container is not healthy: k12-reg`。
+- `k12-reg` 在 `.110` 上已无容器、镜像、卷、网络、systemd unit 或项目定义；72 小时 Docker 事件也无相关记录。它是已退役业务留下的过时必要容器清单，不应恢复一个用途不明的容器来绕过门控。
+- 失败期间 Sidecar `MainPID=0`、锁空闲、无 Xray JSON 或临时容器残留，`cfip-direct` 附着数为 0；没有进入扫描、测速或 DNS 写入。
+- VM36 04:15 任务读取到上一份导出，但导出日期未前进，三日门控保持 `awaiting_multiday_gate`，未更新 Cloudflare，故障安全边界有效。
+- SmartDNS 不是故障原因。VM36 当前继续使用 `dnsmasq` 和 PassWall 的既有 DNS 分流拓扑，本次未安装或修改 SmartDNS。
+
+### 最小修复
+
+- Sidecar 默认必要容器和示例配置改为：`sub2api sub2api-postgres sub2api-redis`。
+- 新增默认容器清单回归契约，防止已退役的 `k12-reg` 再次进入默认门控。
+- `.110` 生产 `/etc/cfip-sidecar/sidecar.env` 显式固定同一三容器清单，避免以后因默认值漂移产生不同结果。
+- Sidecar 专项测试和全项目回归测试均通过。
+- 部署过程中两次因部署器自身校验字符串转义问题触发事务回滚；两次均验证脚本、配置和备份逐字节恢复，未启动 Sidecar、未影响网络。修正部署器后第三次事务成功。
+
+### 部署与验收
+
+- `.110` 新脚本 SHA256：`bf349d04674c8b93b33e09804eb30effec66099912ad5c05de6cbb84995622c4`。
+- root-only 回滚点：`/var/backups/cfip-sidecar/required-containers-fix-20260730-224816`。
+- 部署未手动启动或重启 Sidecar、Docker、Ollama、PassWall、DNS，也未修改 Cloudflare、候选池、门槛或 cron。
+- `.110` Docker PID 保持 `1144`；三个必要容器均 healthy，Ollama 无驻留模型，锁和残留检查通过，Google/YouTube 均为 HTTP 204。
+- VM36 自动同步脚本仍为已部署版本，状态保持 `awaiting_multiday_gate`；一个 Xray 进程正常承载 `1070/1041/11400/15353`，`dnsmasq` 和项目锁正常。
+- PC Google/YouTube 均为 HTTP 204；`auto` 至 `auto4` 在 `192.168.1.1`、`192.168.1.254`、`1.1.1.1` 三路解析一致。
+- `cfip-sidecar.service` 的 `Result=exit-code` 仍反映修复前最后一次自然失败；本次未用手工启动或 `reset-failed` 擦除证据。需要下一次自然 timer 成功后才能完成运行时闭环。
+- `.110` 与 `.140` 显示的主机时间标签进入未来日期 `2026-07-31`，与本次权威日期 `2026-07-30` 不一致。未自动校时，该时间标签不得计入连续三日门控或作为第三日晋升证据。
