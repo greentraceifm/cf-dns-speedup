@@ -30,6 +30,9 @@ CANARY_NICE="${CFIP_ROUTER_CANARY_NICE:-10}"
 CANARY_HISTORY_FILE="${CFIP_ROUTER_CANARY_HISTORY_FILE:-$APP_DIR/router-candidate-canary-history.tsv}"
 CANARY_REPORT_FILE="${CFIP_ROUTER_CANARY_REPORT_FILE:-$APP_DIR/router-candidate-canary.latest.tsv}"
 CANARY_QUALIFIED_FILE="${CFIP_ROUTER_CANARY_QUALIFIED_FILE:-$APP_DIR/router-candidate-competition-qualified.tsv}"
+PRIMARY_CANARY_HISTORY_FILE="${CFIP_ROUTER_PRIMARY_CANARY_HISTORY_FILE:-$APP_DIR/router-primary-canary-history.tsv}"
+PRIMARY_CANARY_REPORT_FILE="${CFIP_ROUTER_PRIMARY_CANARY_REPORT_FILE:-$APP_DIR/router-primary-canary.latest.tsv}"
+PRIMARY_CANARY_QUALIFIED_FILE="${CFIP_ROUTER_PRIMARY_CANARY_QUALIFIED_FILE:-$APP_DIR/router-primary-baseline-qualified.tsv}"
 CANARY_REQUIRED_DAYS="${CFIP_ROUTER_CANARY_REQUIRED_DAYS:-3}"
 CANARY_QUALIFICATION_MAX_AGE_SECONDS="${CFIP_ROUTER_CANARY_QUALIFICATION_MAX_AGE_SECONDS:-604800}"
 CANARY_PID=""
@@ -56,12 +59,15 @@ load_config() {
   [ ! -r "$CONFIG_FILE" ] || . "$CONFIG_FILE"
   CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS="${CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS:-172800}"
   CFIP_ROUTER_CANARY_MIN_MBPS="${CFIP_ROUTER_CANARY_MIN_MBPS:-$HARD_OBSERVATION_MIN_MBPS}"
+  CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS="${CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS:-4.0}"
   [[ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] \
     && [ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" -gt 0 ] \
     && [ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" -le 604800 ] \
     || die "candidate export max age must be between 1 and 604800 seconds"
   decimal_at_least "$CFIP_ROUTER_CANARY_MIN_MBPS" "$HARD_OBSERVATION_MIN_MBPS" \
     || die "router canary threshold cannot be below $HARD_OBSERVATION_MIN_MBPS MB/s"
+  decimal_at_least "$CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS" 4.0 \
+    || die "primary canary threshold cannot be below 4.0 MB/s"
   [[ "$CANARY_PORT" =~ ^[0-9]+$ ]] && [ "$CANARY_PORT" -ge 1024 ] && [ "$CANARY_PORT" -le 65535 ] \
     || die "router canary port is invalid"
   [ "$CANARY_ROUNDS" = "2" ] || die "router canary requires exactly two rounds"
@@ -257,12 +263,20 @@ speed_from_bps() {
   awk -v bps="$1" 'BEGIN {printf "%.2f", (bps + 0) / 1048576}'
 }
 
-refresh_competition_qualified() {
-  local temporary="$CANARY_QUALIFIED_FILE.tmp.$$"
-  mkdir -p "$(dirname "$CANARY_QUALIFIED_FILE")"
-  awk -F '\t' -v required="$CANARY_REQUIRED_DAYS" -v minimum="$CFIP_ROUTER_CANARY_MIN_MBPS" \
+refresh_qualified_report() {
+  local history_file="$1" qualified_file="$2" minimum="$3" qualified_status="$4" path_mode="$5" error_label="$6"
+  local temporary="$qualified_file.tmp.$$"
+  mkdir -p "$(dirname "$qualified_file")"
+  if [ ! -s "$history_file" ]; then
+    printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n' >"$temporary"
+    chmod 600 "$temporary"
+    mv -f "$temporary" "$qualified_file"
+    return 0
+  fi
+  awk -F '\t' -v required="$CANARY_REQUIRED_DAYS" -v minimum="$minimum" \
       -v min_bytes="$CANARY_MIN_BYTES" -v now="$(date +%s)" \
-      -v max_age="$CANARY_QUALIFICATION_MAX_AGE_SECONDS" '
+      -v max_age="$CANARY_QUALIFICATION_MAX_AGE_SECONDS" -v qualified_status="$qualified_status" \
+      -v path_mode="$path_mode" '
     function reset_streak(ip) {
       streak[ip]=0; streak_exports[ip]=0; streak_min[ip]=""; streak_avg_sum[ip]=0; streak_rows[ip]=0
     }
@@ -298,22 +312,35 @@ refresh_competition_qualified() {
       for (ip in ips) {
         finalize_day(ip)
         if (streak[ip] >= required && streak_exports[ip] >= required && streak_rows[ip] > 0)
-          printf "%s\t%d\t%d\t%.2f\t%.2f\t%s\tcompetition_qualified\trouter_isolated_xray\n", \
-            ip, streak[ip], streak_exports[ip], streak_min[ip], streak_avg_sum[ip] / streak_rows[ip], latest[ip]
+          printf "%s\t%d\t%d\t%.2f\t%.2f\t%s\t%s\t%s\n", \
+            ip, streak[ip], streak_exports[ip], streak_min[ip], streak_avg_sum[ip] / streak_rows[ip], \
+            latest[ip], qualified_status, path_mode
       }
     }
-  ' "$CANARY_HISTORY_FILE" 2>/dev/null > "$temporary" || {
+  ' "$history_file" 2>/dev/null > "$temporary" || {
     rm -f "$temporary"
-    die "cannot refresh competition qualification report"
+    die "cannot refresh $error_label qualification report"
   }
   chmod 600 "$temporary"
-  mv -f "$temporary" "$CANARY_QUALIFIED_FILE"
+  mv -f "$temporary" "$qualified_file"
 }
-canary_candidate() {
-  local requested="${1:-}" candidate proxy_tag baseline_pids baseline_listeners
-  local baseline_config_sha baseline_runtime_sha baseline_staging_sha after_pids after_listeners source_epoch
+
+refresh_competition_qualified() {
+  refresh_qualified_report "$CANARY_HISTORY_FILE" "$CANARY_QUALIFIED_FILE" \
+    "$CFIP_ROUTER_CANARY_MIN_MBPS" competition_qualified router_isolated_xray competition
+}
+
+refresh_primary_qualified() {
+  refresh_qualified_report "$PRIMARY_CANARY_HISTORY_FILE" "$PRIMARY_CANARY_QUALIFIED_FILE" \
+    "$CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS" primary_baseline_qualified router_primary_isolated_xray primary
+}
+
+run_isolated_canary() {
+  local mode="$1" requested="${2:-}" candidate proxy_tag baseline_pids baseline_listeners
+  local baseline_config_sha baseline_runtime_sha baseline_staging_sha="" after_pids after_listeners source_epoch
   local round raw http bytes bps speed1=0 speed2=0 bytes1=0 bytes2=0
   local http1=000 http2=000 min_speed avg_speed status observed_at report_tmp
+  local threshold report_file history_file path_mode protect_staging=0
 
   load_config
   need_cmd jq; need_cmd curl; need_cmd netstat; need_cmd pidof; need_cmd sha256sum; need_cmd nice
@@ -329,9 +356,29 @@ canary_candidate() {
   [ -n "$baseline_config_sha" ] || die "PassWall UCI config is not readable"
   assert_runtime_json
   baseline_runtime_sha="$(sha256sum "$RUNTIME_JSON" | awk '{print $1}')"
-  baseline_staging_sha="$(sha256sum "$STAGING_FILE" | awk '{print $1}')"
-  candidate="$(candidate_from_staging "$requested")"
-  source_epoch="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $4 == ip {print $2; exit}' "$STAGING_FILE")"
+  case "$mode" in
+    candidate)
+      baseline_staging_sha="$(sha256sum "$STAGING_FILE" | awk '{print $1}')"
+      candidate="$(candidate_from_staging "$requested")"
+      source_epoch="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $4 == ip {print $2; exit}' "$STAGING_FILE")"
+      threshold="$CFIP_ROUTER_CANARY_MIN_MBPS"
+      report_file="$CANARY_REPORT_FILE"
+      history_file="$CANARY_HISTORY_FILE"
+      path_mode=router_isolated_xray
+      protect_staging=1
+      ;;
+    primary)
+      [ -n "$requested" ] || die "primary canary requires an IP"
+      is_cloudflare_ipv4 "$requested" || die "primary canary target is not a Cloudflare IPv4"
+      candidate="$requested"
+      source_epoch="$(date +%s)"
+      threshold="$CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS"
+      report_file="$PRIMARY_CANARY_REPORT_FILE"
+      history_file="$PRIMARY_CANARY_HISTORY_FILE"
+      path_mode=router_primary_isolated_xray
+      ;;
+    *) die "unsupported isolated canary mode" ;;
+  esac
   proxy_tag="$(proxy_tag_from_runtime)"
   [ -n "$proxy_tag" ] || die "runtime VMess outbound tag is empty"
   assert_canary_port_free
@@ -362,35 +409,48 @@ canary_candidate() {
     || die "PassWall UCI config changed during isolated canary"
   [ "$(sha256sum "$RUNTIME_JSON" | awk '{print $1}')" = "$baseline_runtime_sha" ] \
     || die "PassWall runtime JSON changed during isolated canary"
-  [ "$(sha256sum "$STAGING_FILE" | awk '{print $1}')" = "$baseline_staging_sha" ] \
-    || die "candidate staging file changed during isolated canary"
+  if [ "$protect_staging" -eq 1 ]; then
+    [ "$(sha256sum "$STAGING_FILE" | awk '{print $1}')" = "$baseline_staging_sha" ] \
+      || die "candidate staging file changed during isolated canary"
+  fi
 
   min_speed="$(awk -v a="$speed1" -v b="$speed2" 'BEGIN {printf "%.2f", a < b ? a : b}')"
   avg_speed="$(awk -v a="$speed1" -v b="$speed2" 'BEGIN {printf "%.2f", (a + b) / 2}')"
   status="low"
   if [ "$http1" = "200" ] && [ "$http2" = "200" ] \
     && [ "$bytes1" -ge "$CANARY_MIN_BYTES" ] && [ "$bytes2" -ge "$CANARY_MIN_BYTES" ] \
-    && decimal_at_least "$min_speed" "$CFIP_ROUTER_CANARY_MIN_MBPS"; then
+    && decimal_at_least "$min_speed" "$threshold"; then
     status="pass"
   fi
   observed_at="$(date '+%F %T')"
-  mkdir -p "$(dirname "$CANARY_REPORT_FILE")"
-  report_tmp="$CANARY_REPORT_FILE.tmp.$$"
+  mkdir -p "$(dirname "$report_file")"
+  report_tmp="$report_file.tmp.$$"
   printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' > "$report_tmp"
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\trouter_isolated_xray\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$observed_at" "$candidate" "$source_epoch" "$speed1" "$speed2" "$min_speed" "$avg_speed" \
-    "$http1" "$http2" "$bytes1" "$bytes2" "$status" >> "$report_tmp"
+    "$http1" "$http2" "$bytes1" "$bytes2" "$status" "$path_mode" >> "$report_tmp"
   chmod 600 "$report_tmp"
-  mv -f "$report_tmp" "$CANARY_REPORT_FILE"
-  if [ ! -f "$CANARY_HISTORY_FILE" ]; then
-    printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' > "$CANARY_HISTORY_FILE"
-    chmod 600 "$CANARY_HISTORY_FILE"
+  mv -f "$report_tmp" "$report_file"
+  if [ ! -f "$history_file" ]; then
+    printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' > "$history_file"
+    chmod 600 "$history_file"
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\trouter_isolated_xray\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$observed_at" "$candidate" "$source_epoch" "$speed1" "$speed2" "$min_speed" "$avg_speed" \
-    "$http1" "$http2" "$bytes1" "$bytes2" "$status" >> "$CANARY_HISTORY_FILE"
-  refresh_competition_qualified
-  log "isolated router canary complete: candidate=$candidate min=${min_speed}MB/s status=$status; existing PassWall was not stopped or changed"
+    "$http1" "$http2" "$bytes1" "$bytes2" "$status" "$path_mode" >> "$history_file"
+  case "$mode" in
+    candidate) refresh_competition_qualified ;;
+    primary) refresh_primary_qualified ;;
+  esac
+  log "isolated router $mode canary complete: candidate=$candidate min=${min_speed}MB/s status=$status; existing PassWall was not stopped or changed"
+}
+
+canary_candidate() {
+  run_isolated_canary candidate "${1:-}"
+}
+
+primary_canary_candidate() {
+  run_isolated_canary primary "${1:-}"
 }
 
 canary_plan() {
@@ -440,6 +500,20 @@ refresh_qualification_command() {
     chmod 600 "$CANARY_QUALIFIED_FILE"
   fi
   awk 'NR > 1 {count++} END {print "competition_qualified_count=" (count + 0)}' "$CANARY_QUALIFIED_FILE"
+}
+
+refresh_primary_qualification_command() {
+  load_config
+  mkdir -p "$(dirname "$PRIMARY_CANARY_QUALIFIED_FILE")"
+  if [ -s "$PRIMARY_CANARY_HISTORY_FILE" ]; then
+    refresh_primary_qualified
+  else
+    printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n' \
+      > "$PRIMARY_CANARY_QUALIFIED_FILE"
+    chmod 600 "$PRIMARY_CANARY_QUALIFIED_FILE"
+  fi
+  awk 'NR > 1 {count++} END {print "primary_baseline_qualified_count=" (count + 0)}' \
+    "$PRIMARY_CANARY_QUALIFIED_FILE"
 }
 
 
@@ -588,8 +662,10 @@ main() {
     list) list_candidates ;;
     canary-plan) canary_plan "${2:-}" ;;
     canary) canary_candidate "${2:-}" ;;
+    primary-canary) primary_canary_candidate "${2:-}" ;;
     qualify) refresh_qualification_command ;;
-    *) echo "Usage: $0 {import FILE|list|canary-plan [IP]|canary [IP]|qualify}" >&2; exit 2 ;;
+    primary-qualify) refresh_primary_qualification_command ;;
+    *) echo "Usage: $0 {import FILE|list|canary-plan [IP]|canary [IP]|primary-canary IP|qualify|primary-qualify}" >&2; exit 2 ;;
   esac
 }
 

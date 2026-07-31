@@ -46,6 +46,36 @@ awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.1.10"{a=1} $1=="auto4.examp
 build_competition_targets "$CURRENT" "$TEST_TMP/no-qualified.tsv" "$TARGETS"
 awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.137.93" && $5=="stable_mirror"{a=1} $1=="auto4.example.test" && $2=="104.17.153.15" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS"
 
+PRIMARY_QUALIFIED="$TEST_TMP/primary-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.137.93\t3\t3\t4.00\t4.10\t2026-07-29 04:20:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.153.15\t3\t3\t4.60\t4.70\t2026-07-29 04:21:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t3\t3\t4.20\t4.30\t2026-07-29 04:22:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$PRIMARY_QUALIFIED"
+PROMOTION_QUALIFIED="$TEST_TMP/promotion-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.1.10\t3\t3\t5.10\t5.20\t2026-07-29 04:16:00\tcompetition_qualified\trouter_isolated_xray\n104.17.1.11\t3\t3\t4.90\t5.00\t2026-07-29 04:17:00\tcompetition_qualified\trouter_isolated_xray\n' >"$PROMOTION_QUALIFIED"
+PROMOTION_CURRENT="$TEST_TMP/promotion-current.tsv"
+printf 'auto.example.test\t104.17.137.93\nauto1.example.test\t104.17.153.15\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.1.10\nauto4.example.test\t104.17.1.11\n' >"$PROMOTION_CURRENT"
+PRIMARY_TARGETS="$TEST_TMP/primary-targets.tsv"
+build_primary_targets "$PROMOTION_CURRENT" "$PRIMARY_QUALIFIED" "$PROMOTION_QUALIFIED" "$PRIMARY_TARGETS"
+[ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "complete primary baseline was not accepted" >&2; exit 1; }
+awk -F '\t' '$1=="auto.example.test" && $2=="104.17.1.10" && $5=="challenger"{a=1} $1=="auto1.example.test" && $2=="104.17.153.15"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
+  || { echo "primary ranking or 25 percent promotion is wrong" >&2; exit 1; }
+choose_pending_target "$PROMOTION_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
+awk -F '\t' 'NR==1 && $1=="auto.example.test" && $2=="104.17.1.10" && $3=="104.17.137.93"{ok=1} END{exit ok?0:1}' "$PENDING" \
+  || { echo "primary plan did not select exactly the first mismatched record" >&2; exit 1; }
+
+head -n 1 "$PRIMARY_QUALIFIED" >"$TEST_TMP/empty-primary-qualified.tsv"
+build_primary_targets "$PROMOTION_CURRENT" "$TEST_TMP/empty-primary-qualified.tsv" "$PROMOTION_QUALIFIED" "$PRIMARY_TARGETS"
+[ "$PRIMARY_BASELINE_READY" -eq 0 ] && [ ! -s "$PRIMARY_TARGETS" ] \
+  || { echo "incomplete primary baseline did not fail closed" >&2; exit 1; }
+
+sed 's/104.17.1.10\t3\t3\t5.10/104.17.1.10\t3\t3\t4.99/' "$PROMOTION_QUALIFIED" >"$TEST_TMP/below-improvement.tsv"
+build_primary_targets "$PROMOTION_CURRENT" "$PRIMARY_QUALIFIED" "$TEST_TMP/below-improvement.tsv" "$PRIMARY_TARGETS"
+if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then
+  echo "challenger below 25 percent improvement entered primary targets" >&2; exit 1
+fi
+build_primary_targets "$CURRENT" "$PRIMARY_QUALIFIED" "$PROMOTION_QUALIFIED" "$PRIMARY_TARGETS"
+if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then
+  echo "challenger outside auto3/auto4 entered primary targets" >&2; exit 1
+fi
+
 CONFIG_FILE="$TEST_TMP/config.env"; AUTO_CONFIG_FILE="$TEST_TMP/auto.env"
 cat >"$CONFIG_FILE" <<'DATA'
 CF_API_TOKEN=dummy
@@ -63,9 +93,13 @@ CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT=25
 CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY=0
 DATA
 load_config
-sed 's/PRIMARY_PROMOTION_APPLY=0/PRIMARY_PROMOTION_APPLY=1/' "$AUTO_CONFIG_FILE" >"$TEST_TMP/unsafe.env"
+sed 's/PRIMARY_PROMOTION_APPLY=0/PRIMARY_PROMOTION_APPLY=1/' "$AUTO_CONFIG_FILE" >"$TEST_TMP/enabled.env"
+if ! (AUTO_CONFIG_FILE="$TEST_TMP/enabled.env" load_config >/dev/null 2>&1); then
+  echo "authorized primary promotion apply value was rejected" >&2; exit 1
+fi
+sed 's/PRIMARY_PROMOTION_APPLY=0/PRIMARY_PROMOTION_APPLY=2/' "$AUTO_CONFIG_FILE" >"$TEST_TMP/unsafe.env"
 if (AUTO_CONFIG_FILE="$TEST_TMP/unsafe.env" load_config >/dev/null 2>&1); then
-  echo "primary promotion apply was not fail-closed" >&2; exit 1
+  echo "invalid primary promotion apply value was accepted" >&2; exit 1
 fi
 sed 's/MAX_CANARIES=3/MAX_CANARIES=4/' "$AUTO_CONFIG_FILE" >"$TEST_TMP/too-many.env"
 if (AUTO_CONFIG_FILE="$TEST_TMP/too-many.env" load_config >/dev/null 2>&1); then

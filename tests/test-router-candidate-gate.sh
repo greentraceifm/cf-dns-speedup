@@ -78,6 +78,29 @@ bash "$SCRIPT" qualify | grep -q 'competition_qualified_count=1'
 awk -F '\t' '$1=="104.17.1.10" && $2==3 && $3==3 && $4==4.00 && $7=="competition_qualified" {ok=1} END{exit ok?0:1}' "$QUALIFIED" \
   || { echo "consecutive three-day qualification failed" >&2; exit 1; }
 
+PRIMARY_HISTORY="$APP_DIR/router-primary-canary-history.tsv"
+PRIMARY_QUALIFIED="$APP_DIR/router-primary-baseline-qualified.tsv"
+printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' >"$PRIMARY_HISTORY"
+add_primary_history() {
+  printf '%s\t104.17.2.20\t%s\t%s\t%s\t%s\t%s\t200\t200\t20000000\t20000000\t%s\trouter_primary_isolated_xray\n' \
+    "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$PRIMARY_HISTORY"
+}
+add_primary_history "$(date -d '2 days ago' '+%F 04:20:00')" "$((NOW-172000))" 4.30 4.20 4.20 4.25 pass
+add_primary_history "$(date -d '1 day ago' '+%F 04:20:00')" "$((NOW-86000))" 4.40 4.30 4.30 4.35 pass
+bash "$SCRIPT" primary-qualify | grep -q 'primary_baseline_qualified_count=0'
+add_primary_history "$(date '+%F 04:20:00')" "$NOW" 4.50 4.40 4.40 4.45 pass
+bash "$SCRIPT" primary-qualify | grep -q 'primary_baseline_qualified_count=1'
+awk -F '\t' '$1=="104.17.2.20" && $2==3 && $3==3 && $4==4.20 && $7=="primary_baseline_qualified" && $8=="router_primary_isolated_xray" {ok=1} END{exit ok?0:1}' "$PRIMARY_QUALIFIED" \
+  || { echo "primary three-day baseline qualification failed" >&2; exit 1; }
+
+printf 'CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS=3.9\n' >"$TMP_DIR/unsafe-primary.env"
+if CONFIG_FILE="$TMP_DIR/unsafe-primary.env" bash "$SCRIPT" primary-qualify >"$TMP_DIR/unsafe-primary.out" 2>&1; then
+  echo "primary threshold below 4.0 MB/s was accepted" >&2; exit 1
+fi
+if bash "$SCRIPT" primary-canary 203.0.113.9 >"$TMP_DIR/non-cf-primary.out" 2>&1; then
+  echo "non-Cloudflare primary canary target was accepted" >&2; exit 1
+fi
+
 if grep -Eq 'passwall (restart|stop)|/etc/init.d/passwall|uci (set|commit)|api.cloudflare.com' "$SCRIPT"; then
   echo "candidate gate contains forbidden production mutation" >&2; exit 1
 fi

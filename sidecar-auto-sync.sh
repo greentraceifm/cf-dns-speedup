@@ -8,6 +8,7 @@ AUTO_CONFIG_FILE="${AUTO_CONFIG_FILE:-$APP_DIR/sidecar-auto-sync.env}"
 GATE_SCRIPT="${CFIP_AUTO_SYNC_GATE_SCRIPT:-$APP_DIR/router-candidate-gate.sh}"
 STAGING_FILE="${CFIP_CANDIDATE_STAGING_DIR:-$APP_DIR/candidate-staging}/sidecar-candidates.latest.tsv"
 QUALIFIED_FILE="${CFIP_ROUTER_CANARY_QUALIFIED_FILE:-$APP_DIR/router-candidate-competition-qualified.tsv}"
+PRIMARY_QUALIFIED_FILE="${CFIP_ROUTER_PRIMARY_CANARY_QUALIFIED_FILE:-$APP_DIR/router-primary-baseline-qualified.tsv}"
 REPORT_FILE="${CFIP_AUTO_SYNC_REPORT_FILE:-$APP_DIR/sidecar-auto-sync.latest.tsv}"
 HISTORY_FILE="${CFIP_AUTO_SYNC_HISTORY_FILE:-$APP_DIR/sidecar-auto-sync-history.tsv}"
 STATE_FILE="${CFIP_AUTO_SYNC_STATE_FILE:-$APP_DIR/sidecar-auto-sync.state}"
@@ -113,6 +114,7 @@ load_config() {
   CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY="${CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY:-0}"
   export CFIP_ROUTER_CANARY_REQUIRED_DAYS="${CFIP_ROUTER_CANARY_REQUIRED_DAYS:-3}"
   export CFIP_ROUTER_CANARY_MIN_MBPS="$CFIP_AUTO_SYNC_MIN_MBPS"
+  export CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS="$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS"
 
   [ -n "$CF_API_TOKEN" ] || die "Cloudflare token is missing"
   [ -n "$CF_ZONE_ID" ] || die "Cloudflare zone id is missing"
@@ -129,8 +131,8 @@ load_config() {
   [[ "$CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT" =~ ^[0-9]+$ ]] \
     && [ "$CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT" -ge 25 ] \
     || die "primary improvement requirement cannot be below 25 percent"
-  [ "$CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY" = 0 ] \
-    || die "primary promotion remains disabled pending three-day acceptance"
+  { [ "$CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY" = 0 ] || [ "$CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY" = 1 ]; } \
+    || die "CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY must be 0 or 1"
   [ -n "$CFIP_AUTO_SYNC_RECORDS" ] || die "automatic competition records are missing"
   [ -n "$CFIP_AUTO_SYNC_PRIMARY_RECORDS" ] || die "automatic primary records are missing"
 }
@@ -185,6 +187,19 @@ run_canaries() {
   done < <(tail -n +2 "$STAGING_FILE")
 }
 
+run_primary_canaries() {
+  local current_records="$1" name candidate seen=""
+  local -a primary_names=()
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
+  for name in "${primary_names[@]}"; do
+    candidate="$(record_content "$current_records" "$name")"
+    [ -n "$candidate" ] || die "cannot determine current primary record content"
+    case " $seen " in *" $candidate "*) continue ;; esac
+    "$GATE_SCRIPT" primary-canary "$candidate"
+    seen="$seen $candidate"
+  done
+}
 choose_qualified_candidates() {
   local output="$1"
   [ -s "$QUALIFIED_FILE" ] || { : >"$output"; return 0; }
@@ -239,13 +254,91 @@ build_competition_targets() {
   done
 }
 
+PRIMARY_BASELINE_READY=0
+
+build_primary_targets() {
+  local current_records="$1" primary_qualified="$2" competition_qualified="$3" output="$4"
+  local pool="$output.pool.$$" ranked="$output.ranked.$$" rc=0 index=0 name
+  local -a primary_names=() winners=() mins=() avgs=() sources=()
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
+  : >"$output"
+  PRIMARY_BASELINE_READY=0
+
+  awk -F '\t' -v current_file="$current_records" -v primary_file="$primary_qualified" \
+      -v competition_file="$competition_qualified" -v primary_names="$CFIP_AUTO_SYNC_PRIMARY_RECORDS" \
+      -v competition_names="$CFIP_AUTO_SYNC_RECORDS" -v primary_min="$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" \
+      -v improvement="$CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT" '
+    FILENAME == current_file {records[$1]=$2; next}
+    FILENAME == primary_file {
+      if (FNR > 1 && $7 == "primary_baseline_qualified") {
+        p_days[$1]=$2+0; p_min[$1]=$4+0; p_avg[$1]=$5+0
+      }
+      next
+    }
+    FILENAME == competition_file {
+      if (FNR > 1 && $7 == "competition_qualified") {
+        c_days[$1]=$2+0; c_min[$1]=$4+0; c_avg[$1]=$5+0
+      }
+      next
+    }
+    END {
+      primary_count=split(primary_names, primary_record, /[ ]+/)
+      competition_count=split(competition_names, competition_record, /[ ]+/)
+      weak_min=""
+      for (i=1; i<=primary_count; i++) {
+        ip=records[primary_record[i]]
+        if (ip == "") exit 4
+        current_primary[ip]=1
+        if (ip in p_min) {
+          pool[ip]=1; days[ip]=p_days[ip]; minimum[ip]=p_min[ip]; average[ip]=p_avg[ip]; source[ip]="primary_history"
+        } else if ((ip in c_min) && c_min[ip] >= primary_min) {
+          pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="competition_history"
+        } else exit 3
+        if (weak_min == "" || minimum[ip] < weak_min) weak_min=minimum[ip]
+      }
+      for (ip in p_min) {
+        pool[ip]=1; days[ip]=p_days[ip]; minimum[ip]=p_min[ip]; average[ip]=p_avg[ip]; source[ip]="primary_history"
+      }
+      for (i=1; i<=competition_count; i++) {
+        ip=records[competition_record[i]]
+        if (ip == "" || (ip in current_primary) || !(ip in c_min)) continue
+        if (c_min[ip] < primary_min) continue
+        if ((c_min[ip] * 100) + 0.0001 < weak_min * (100 + improvement)) continue
+        pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="challenger"
+      }
+      for (ip in pool)
+        printf "%s\t%d\t%.2f\t%.2f\t%s\n", ip, days[ip], minimum[ip], average[ip], source[ip]
+    }
+  ' "$current_records" "$primary_qualified" "$competition_qualified" >"$pool" || rc=$?
+  case "$rc" in
+    0) ;;
+    3) rm -f "$pool" "$ranked"; return 0 ;;
+    4) rm -f "$pool" "$ranked"; die "cannot resolve all primary record contents" ;;
+    *) rm -f "$pool" "$ranked"; die "cannot build primary ranking pool" ;;
+  esac
+
+  sort -t $'\t' -k3,3nr -k4,4nr -k2,2nr -k1,1 "$pool" | head -n 3 >"$ranked"
+  [ "$(awk 'END {print NR + 0}' "$ranked")" -eq 3 ] \
+    || { rm -f "$pool" "$ranked"; die "primary ranking pool has fewer than three qualified IPs"; }
+  while IFS=$'\t' read -r candidate days minimum average source; do
+    winners+=("$candidate"); mins+=("$minimum"); avgs+=("$average"); sources+=("$source")
+  done <"$ranked"
+  for index in 0 1 2; do
+    name="${primary_names[$index]}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${winners[$index]}" "${mins[$index]}" \
+      "${avgs[$index]}" "${sources[$index]}" >>"$output"
+  done
+  rm -f "$pool" "$ranked"
+  PRIMARY_BASELINE_READY=1
+}
 choose_pending_target() {
   local current_records="$1" targets="$2" output="$3"
   local name desired minimum average source current
   : >"$output"
   while IFS=$'\t' read -r name desired minimum average source; do
     current="$(record_content "$current_records" "$name")"
-    [ -n "$current" ] || die "cannot determine current competition record content"
+    [ -n "$current" ] || die "cannot determine current target record content"
     if [ "$current" != "$desired" ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$desired" "$current" "$minimum" "$average" "$source" >"$output"
@@ -283,9 +376,9 @@ collect_current_records() {
 }
 
 run_sync() {
-  local export_file qualified_file current_records targets pending row_count
-  local target candidate previous_content candidate_min candidate_avg target_source
-  local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response
+  local export_file qualified_file current_records competition_targets primary_targets pending row_count
+  local target candidate previous_content candidate_min candidate_avg target_source target_kind=""
+  local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response apply_enabled
 
   load_config
   for command in awk bash curl flock jq netstat pidof sha256sum ssh timeout; do need_cmd "$command"; done
@@ -308,45 +401,73 @@ run_sync() {
   export_file="$TMP_DIR/candidates.tsv"
   qualified_file="$TMP_DIR/qualified.tsv"
   current_records="$TMP_DIR/current-records.tsv"
-  targets="$TMP_DIR/competition-targets.tsv"
+  competition_targets="$TMP_DIR/competition-targets.tsv"
+  primary_targets="$TMP_DIR/primary-targets.tsv"
   pending="$TMP_DIR/pending-target.tsv"
 
   pull_export "$export_file"
   "$GATE_SCRIPT" import "$export_file"
   row_count="$(awk 'NR > 1 {count++} END {print count + 0}' "$STAGING_FILE")"
+  collect_current_records "$current_records"
   : >"$qualified_file"
   if [ "$row_count" -gt 0 ]; then
     run_canaries
     "$GATE_SCRIPT" qualify >/dev/null
     choose_qualified_candidates "$qualified_file"
   fi
+  run_primary_canaries "$current_records"
+  "$GATE_SCRIPT" primary-qualify >/dev/null
 
-  collect_current_records "$current_records"
-  build_competition_targets "$current_records" "$qualified_file" "$targets"
-  choose_pending_target "$current_records" "$targets" "$pending"
+  build_competition_targets "$current_records" "$qualified_file" "$competition_targets"
+  choose_pending_target "$current_records" "$competition_targets" "$pending"
+  if [ -s "$pending" ]; then
+    target_kind=competition
+  else
+    build_primary_targets "$current_records" "$PRIMARY_QUALIFIED_FILE" "$QUALIFIED_FILE" "$primary_targets"
+    if [ "$PRIMARY_BASELINE_READY" -eq 1 ]; then
+      choose_pending_target "$current_records" "$primary_targets" "$pending"
+      [ ! -s "$pending" ] || target_kind=primary
+    fi
+  fi
+
   if [ ! -s "$pending" ]; then
-    if [ "$row_count" -eq 0 ]; then
+    if [ "$PRIMARY_BASELINE_READY" -ne 1 ]; then
+      write_report awaiting_primary_baseline "" "" "" primary_records_need_three_distinct_days_on_router_isolated_xray
+      log "primary records have not completed the consecutive three-day same-path baseline"
+    elif [ "$row_count" -eq 0 ]; then
       write_report no_candidate "" "" "" sidecar_export_has_no_3.5_MBps_observation_candidate
-      log "sidecar export has no observation candidate; competition slots already match stable mirrors"
+      log "sidecar export has no observation candidate; primary and competition slots are already safe"
     elif [ ! -s "$qualified_file" ]; then
       write_report awaiting_multiday_gate "" "" "" candidate_not_yet_qualified_for_competition
       log "observation candidates have not completed the consecutive three-day router gate"
     else
       candidate="$(awk -F '\t' 'NR == 1 {print $1}' "$qualified_file")"
-      write_report already_present "$candidate" "" "" competition_slots_already_match_ranked_targets
-      log "competition slots already match the ranked challenger/mirror targets"
+      write_report already_present "$candidate" "" "" competition_and_primary_slots_already_match_ranked_targets
+      log "competition and primary slots already match the ranked targets"
     fi
     return 0
   fi
 
   IFS=$'\t' read -r target candidate previous_content candidate_min candidate_avg target_source <"$pending"
-  if [ "$target_source" = challenger ]; then
+  if [ "$target_kind" = competition ] && [ "$target_source" = challenger ]; then
     decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_MIN_MBPS" \
       || die "qualified challenger is below automatic sync threshold"
   fi
-  if [ "$CFIP_AUTO_SYNC_APPLY" -ne 1 ]; then
-    write_report planned "$candidate" "$target" "$previous_content" "source=$target_source"
-    log "competition slot plan ready but apply is disabled"
+  if [ "$target_kind" = primary ]; then
+    decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" \
+      || die "primary target is below the automatic primary threshold"
+    apply_enabled="$CFIP_AUTO_SYNC_PRIMARY_PROMOTION_APPLY"
+  else
+    apply_enabled="$CFIP_AUTO_SYNC_APPLY"
+  fi
+  if [ "$apply_enabled" -ne 1 ]; then
+    if [ "$target_kind" = primary ]; then
+      write_report primary_planned "$candidate" "$target" "$previous_content" "source=$target_source"
+      log "primary slot plan ready but primary promotion apply is disabled"
+    else
+      write_report planned "$candidate" "$target" "$previous_content" "source=$target_source"
+      log "competition slot plan ready but apply is disabled"
+    fi
     return 0
   fi
 
@@ -378,10 +499,15 @@ run_sync() {
     "$target" "$candidate" "$target_source" "$(date '+%F %T')" >"$STATE_FILE.tmp.$$"
   chmod 600 "$STATE_FILE.tmp.$$"
   mv -f "$STATE_FILE.tmp.$$" "$STATE_FILE"
-  write_report updated "$candidate" "$target" "$previous_content" \
-    "source=${target_source}_min=${candidate_min:-n/a}_avg=${candidate_avg:-n/a}"
+  if [ "$target_kind" = primary ]; then
+    write_report primary_updated "$candidate" "$target" "$previous_content" \
+      "source=${target_source}_min=${candidate_min:-n/a}_avg=${candidate_avg:-n/a}"
+  else
+    write_report updated "$candidate" "$target" "$previous_content" \
+      "source=${target_source}_min=${candidate_min:-n/a}_avg=${candidate_avg:-n/a}"
+  fi
   UPDATE_APPLIED=0
-  log "Cloudflare competition slot sync complete: record=$target; PassWall was not stopped or restarted"
+  log "Cloudflare $target_kind slot sync complete: record=$target; PassWall was not stopped or restarted"
 }
 status_command() {
   [ -r "$AUTO_CONFIG_FILE" ] && echo auto_config=present || echo auto_config=missing
