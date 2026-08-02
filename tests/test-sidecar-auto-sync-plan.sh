@@ -30,6 +30,12 @@ auto3.example.test	104.17.137.93
 auto4.example.test	104.17.153.15
 DATA
 QUALIFIED="$TEST_TMP/qualified.tsv"; TARGETS="$TEST_TMP/targets.tsv"; PENDING="$TEST_TMP/pending.tsv"
+printf '104.17.9.9\t9\t3.60\t3.90\n104.17.1.1\t3\t4.50\t4.60\n104.17.8.8\t5\t4.20\t4.70\n' \
+  | rank_candidate_rows 2 >"$TEST_TMP/portable-ranking.tsv"
+awk -F '\t' 'NR==1 && $1=="104.17.1.1"{a=1} NR==2 && $1=="104.17.8.8"{b=1} END{exit(a&&b)?0:1}' \
+  "$TEST_TMP/portable-ranking.tsv" \
+  || { echo "portable numeric ranking is wrong" >&2; exit 1; }
+
 choose_qualified_candidates "$QUALIFIED"
 [ "$(awk -F '\t' 'NR==1{print $1}' "$QUALIFIED")" = 104.17.1.10 ] || { echo "minimum-speed ranking is wrong" >&2; exit 1; }
 build_competition_targets "$CURRENT" "$QUALIFIED" "$TARGETS"

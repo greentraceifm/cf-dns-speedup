@@ -209,8 +209,42 @@ choose_qualified_candidates() {
       print $1 "\t" $2 "\t" $4 "\t" $5
     }
   ' "$STAGING_FILE" "$QUALIFIED_FILE" \
-    | sort -t $'\t' -k3,3nr -k4,4nr -k2,2nr -k1,1 \
-    | head -n 2 >"$output"
+    | rank_candidate_rows 2 >"$output"
+}
+
+rank_candidate_rows() {
+  local limit="$1"
+  awk -F '\t' -v limit="$limit" '
+    function better(a, b) {
+      if (minimum[a] != minimum[b]) return minimum[a] > minimum[b]
+      if (average[a] != average[b]) return average[a] > average[b]
+      if (days[a] != days[b]) return days[a] > days[b]
+      return candidate[a] < candidate[b]
+    }
+    function swap(a, b, value) {
+      value=row[a]; row[a]=row[b]; row[b]=value
+      value=candidate[a]; candidate[a]=candidate[b]; candidate[b]=value
+      value=days[a]; days[a]=days[b]; days[b]=value
+      value=minimum[a]; minimum[a]=minimum[b]; minimum[b]=value
+      value=average[a]; average[a]=average[b]; average[b]=value
+    }
+    NF >= 4 {
+      count++
+      row[count]=$0
+      candidate[count]=$1
+      days[count]=$2+0
+      minimum[count]=$3+0
+      average[count]=$4+0
+    }
+    END {
+      for (i=1; i<=count; i++) {
+        best=i
+        for (j=i+1; j<=count; j++) if (better(j, best)) best=j
+        if (best != i) swap(i, best)
+      }
+      for (i=1; i<=count && i<=limit; i++) print row[i]
+    }
+  '
 }
 
 record_content() {
@@ -318,7 +352,7 @@ build_primary_targets() {
     *) rm -f "$pool" "$ranked"; die "cannot build primary ranking pool" ;;
   esac
 
-  sort -t $'\t' -k3,3nr -k4,4nr -k2,2nr -k1,1 "$pool" | head -n 3 >"$ranked"
+  rank_candidate_rows 3 <"$pool" >"$ranked"
   [ "$(awk 'END {print NR + 0}' "$ranked")" -eq 3 ] \
     || { rm -f "$pool" "$ranked"; die "primary ranking pool has fewer than three qualified IPs"; }
   while IFS=$'\t' read -r candidate days minimum average source; do
