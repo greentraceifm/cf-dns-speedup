@@ -30,6 +30,7 @@ CANARY_NICE="${CFIP_ROUTER_CANARY_NICE:-10}"
 CANARY_HISTORY_FILE="${CFIP_ROUTER_CANARY_HISTORY_FILE:-$APP_DIR/router-candidate-canary-history.tsv}"
 CANARY_REPORT_FILE="${CFIP_ROUTER_CANARY_REPORT_FILE:-$APP_DIR/router-candidate-canary.latest.tsv}"
 CANARY_QUALIFIED_FILE="${CFIP_ROUTER_CANARY_QUALIFIED_FILE:-$APP_DIR/router-candidate-competition-qualified.tsv}"
+CANARY_ALLOWED_FILE="${CFIP_ROUTER_CANARY_ALLOWED_FILE:-}"
 PRIMARY_CANARY_HISTORY_FILE="${CFIP_ROUTER_PRIMARY_CANARY_HISTORY_FILE:-$APP_DIR/router-primary-canary-history.tsv}"
 PRIMARY_CANARY_REPORT_FILE="${CFIP_ROUTER_PRIMARY_CANARY_REPORT_FILE:-$APP_DIR/router-primary-canary.latest.tsv}"
 PRIMARY_CANARY_QUALIFIED_FILE="${CFIP_ROUTER_PRIMARY_CANARY_QUALIFIED_FILE:-$APP_DIR/router-primary-baseline-qualified.tsv}"
@@ -148,6 +149,29 @@ assert_runtime_json() {
     "$RUNTIME_JSON" >/dev/null || die "runtime JSON has no supported single VMess address"
 }
 
+validate_allowed_candidate_file() {
+  local candidate epoch source extra count=0 seen=""
+  [ -n "$CANARY_ALLOWED_FILE" ] || die "retained candidate allowlist is missing"
+  [ -f "$CANARY_ALLOWED_FILE" ] && [ ! -L "$CANARY_ALLOWED_FILE" ] \
+    || die "retained candidate allowlist must be a regular non-symlink file"
+  [ "$(wc -c <"$CANARY_ALLOWED_FILE" | tr -d ' ')" -le 4096 ] \
+    || die "retained candidate allowlist is unexpectedly large"
+  [ "$(head -n 1 "$CANARY_ALLOWED_FILE")" = $'candidate_ip\tsource_export_epoch\tsource' ] \
+    || die "retained candidate allowlist header is invalid"
+  while IFS=$'\t' read -r candidate epoch source extra; do
+    [ -n "$candidate" ] || continue
+    [ -z "${extra:-}" ] || die "retained candidate allowlist has extra fields"
+    is_cloudflare_ipv4 "$candidate" || die "retained candidate allowlist contains a non-Cloudflare IPv4"
+    [[ "$epoch" =~ ^[0-9]{10}$ ]] && [ "$epoch" = "$VALIDATED_EPOCH" ] \
+      || die "retained candidate allowlist is not bound to the current export"
+    case "$source" in retained|staging) ;; *) die "retained candidate allowlist source is invalid" ;; esac
+    case " $seen " in *" $candidate "*) die "retained candidate allowlist contains a duplicate IP" ;; esac
+    seen="$seen $candidate"
+    count=$((count + 1))
+    [ "$count" -le 3 ] || die "retained candidate allowlist contains more than three entries"
+  done < <(tail -n +2 "$CANARY_ALLOWED_FILE")
+}
+
 candidate_from_staging() {
   local requested="${1:-}" candidate
   validate_export_file "$STAGING_FILE"
@@ -155,11 +179,25 @@ candidate_from_staging() {
   if [ -n "$requested" ]; then
     is_cloudflare_ipv4 "$requested" || die "requested canary candidate is not a Cloudflare IPv4"
     candidate="$(awk -F '\t' -v ip="$requested" 'NR > 1 && $4 == ip {print $4; exit}' "$STAGING_FILE")"
-    [ "$candidate" = "$requested" ] || die "requested candidate is not in the staging queue"
+    if [ "$candidate" != "$requested" ]; then
+      validate_allowed_candidate_file
+      candidate="$(awk -F '\t' -v ip="$requested" 'NR > 1 && $1 == ip {print $1; exit}' "$CANARY_ALLOWED_FILE")"
+      [ "$candidate" = "$requested" ] || die "requested candidate is not in the current canary plan"
+    fi
   else
     candidate="$(awk -F '\t' 'NR == 2 {print $4; exit}' "$STAGING_FILE")"
   fi
   printf '%s\n' "$candidate"
+}
+
+candidate_source_epoch() {
+  local candidate="$1" epoch
+  epoch="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $4 == ip {print $2; exit}' "$STAGING_FILE")"
+  if [ -z "$epoch" ] && [ -n "$CANARY_ALLOWED_FILE" ]; then
+    epoch="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $1 == ip {print $2; exit}' "$CANARY_ALLOWED_FILE")"
+  fi
+  [ -n "$epoch" ] || die "candidate source epoch is missing"
+  printf '%s\n' "$epoch"
 }
 
 proxy_tag_from_runtime() {
@@ -360,7 +398,7 @@ run_isolated_canary() {
     candidate)
       baseline_staging_sha="$(sha256sum "$STAGING_FILE" | awk '{print $1}')"
       candidate="$(candidate_from_staging "$requested")"
-      source_epoch="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $4 == ip {print $2; exit}' "$STAGING_FILE")"
+      source_epoch="$(candidate_source_epoch "$candidate")"
       threshold="$CFIP_ROUTER_CANARY_MIN_MBPS"
       report_file="$CANARY_REPORT_FILE"
       history_file="$CANARY_HISTORY_FILE"
@@ -665,7 +703,8 @@ main() {
     primary-canary) primary_canary_candidate "${2:-}" ;;
     qualify) refresh_qualification_command ;;
     primary-qualify) refresh_primary_qualification_command ;;
-    *) echo "Usage: $0 {import FILE|list|canary-plan [IP]|canary [IP]|primary-canary IP|qualify|primary-qualify}" >&2; exit 2 ;;
+    validate-candidate) is_cloudflare_ipv4 "${2:-}" || exit 1 ;;
+    *) echo "Usage: $0 {import FILE|list|canary-plan [IP]|canary [IP]|primary-canary IP|qualify|primary-qualify|validate-candidate IP}" >&2; exit 2 ;;
   esac
 }
 

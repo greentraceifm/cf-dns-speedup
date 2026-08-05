@@ -8,6 +8,8 @@ AUTO_CONFIG_FILE="${AUTO_CONFIG_FILE:-$APP_DIR/sidecar-auto-sync.env}"
 GATE_SCRIPT="${CFIP_AUTO_SYNC_GATE_SCRIPT:-$APP_DIR/router-candidate-gate.sh}"
 STAGING_FILE="${CFIP_CANDIDATE_STAGING_DIR:-$APP_DIR/candidate-staging}/sidecar-candidates.latest.tsv"
 QUALIFIED_FILE="${CFIP_ROUTER_CANARY_QUALIFIED_FILE:-$APP_DIR/router-candidate-competition-qualified.tsv}"
+CANARY_HISTORY_FILE="${CFIP_ROUTER_CANARY_HISTORY_FILE:-$APP_DIR/router-candidate-canary-history.tsv}"
+WATCHLIST_FILE="${CFIP_AUTO_SYNC_WATCHLIST_FILE:-$APP_DIR/router-candidate-watchlist.tsv}"
 PRIMARY_QUALIFIED_FILE="${CFIP_ROUTER_PRIMARY_CANARY_QUALIFIED_FILE:-$APP_DIR/router-primary-baseline-qualified.tsv}"
 REPORT_FILE="${CFIP_AUTO_SYNC_REPORT_FILE:-$APP_DIR/sidecar-auto-sync.latest.tsv}"
 HISTORY_FILE="${CFIP_AUTO_SYNC_HISTORY_FILE:-$APP_DIR/sidecar-auto-sync-history.tsv}"
@@ -23,6 +25,7 @@ CFIP_AUTO_SYNC_APPLY="${CFIP_AUTO_SYNC_APPLY:-0}"
 CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
 CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
 CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
+CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS:-172800}"
 CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
 CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
 CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
@@ -108,6 +111,7 @@ load_config() {
   CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
   CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
   CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
+  CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS:-172800}"
   CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
   CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
   CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
@@ -124,6 +128,10 @@ load_config() {
     && [ "$CFIP_AUTO_SYNC_MAX_CANARIES" -ge 1 ] \
     && [ "$CFIP_AUTO_SYNC_MAX_CANARIES" -le 3 ] \
     || die "CFIP_AUTO_SYNC_MAX_CANARIES must be between 1 and 3"
+  [[ "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] \
+    && [ "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" -ge 86400 ] \
+    && [ "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" -le 604800 ] \
+    || die "watchlist max age must be between 86400 and 604800 seconds"
   decimal_at_least "$CFIP_AUTO_SYNC_MIN_MBPS" 3.5 \
     || die "automatic sync threshold cannot be below 3.5 MB/s"
   decimal_at_least "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" 4.0 \
@@ -177,14 +185,140 @@ pull_export() {
   [ "$(wc -c <"$destination")" -le 65536 ] || die "sidecar export is too large"
 }
 
-run_canaries() {
-  local count=0 candidate
-  while IFS=$'\t' read -r _schema _epoch _observed candidate _rest; do
+current_epoch() {
+  date +%s
+}
+
+watchlist_limit() {
+  local limit=$((CFIP_AUTO_SYNC_MAX_CANARIES - 1))
+  [ "$limit" -le 2 ] || limit=2
+  [ "$limit" -ge 0 ] || limit=0
+  printf '%s\n' "$limit"
+}
+
+validate_watchlist() {
+  local count=0 candidate days minimum average observed epoch status extra now
+  [ -e "$WATCHLIST_FILE" ] || return 0
+  [ -f "$WATCHLIST_FILE" ] && [ ! -L "$WATCHLIST_FILE" ] \
+    || die "candidate watchlist must be a regular non-symlink file"
+  [ "$(wc -c <"$WATCHLIST_FILE")" -le 4096 ] || die "candidate watchlist is unexpectedly large"
+  [ "$(head -n 1 "$WATCHLIST_FILE")" = $'candidate_ip\tconsecutive_pass_days\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tlast_observed_epoch\tstatus' ] \
+    || die "candidate watchlist header is invalid"
+  now="$(current_epoch)"
+  while IFS=$'\t' read -r candidate days minimum average observed epoch status extra; do
     [ -n "$candidate" ] || continue
-    "$GATE_SCRIPT" canary "$candidate"
+    [ -z "${extra:-}" ] || die "candidate watchlist has extra fields"
+    "$GATE_SCRIPT" validate-candidate "$candidate" >/dev/null \
+      || die "candidate watchlist contains a non-Cloudflare IPv4"
+    [[ "$days" =~ ^[0-9]+$ ]] && [ "$days" -ge 1 ] || die "candidate watchlist streak is invalid"
+    [[ "$minimum" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "candidate watchlist minimum is invalid"
+    [[ "$average" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "candidate watchlist average is invalid"
+    [[ "$epoch" =~ ^[0-9]+$ ]] && [ "$epoch" -le "$((now + 300))" ] \
+      || die "candidate watchlist timestamp is invalid"
+    [ "$status" = retained ] || die "candidate watchlist status is invalid"
+    count=$((count + 1))
+    [ "$count" -le 2 ] || die "candidate watchlist contains more than two entries"
+  done < <(tail -n +2 "$WATCHLIST_FILE")
+}
+
+build_canary_plan() {
+  local current_records="$1" output="$2" source_epoch retained_limit now count=0
+  local candidate days minimum average observed epoch status extra primary1 primary2 primary3
+  local -a primary_names=()
+  local seen=""
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
+  primary1="$(record_content "$current_records" "${primary_names[0]}")"
+  primary2="$(record_content "$current_records" "${primary_names[1]}")"
+  primary3="$(record_content "$current_records" "${primary_names[2]}")"
+  [ -n "$primary1" ] && [ -n "$primary2" ] && [ -n "$primary3" ] \
+    || die "cannot resolve all primary record contents"
+  source_epoch="$(awk -F '\t' 'NR == 2 {print $2; exit}' "$STAGING_FILE")"
+  printf 'candidate_ip\tsource_export_epoch\tsource\n' >"$output"
+  [ -n "$source_epoch" ] || return 0
+  retained_limit="$(watchlist_limit)"
+  now="$(current_epoch)"
+  validate_watchlist
+  if [ "$retained_limit" -gt 0 ] && [ -s "$WATCHLIST_FILE" ]; then
+    while IFS=$'\t' read -r candidate days minimum average observed epoch status extra; do
+      [ -n "$candidate" ] || continue
+      [ "$((now - epoch))" -le "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" ] || continue
+      case "$candidate" in "$primary1"|"$primary2"|"$primary3") continue ;; esac
+      case " $seen " in *" $candidate "*) continue ;; esac
+      printf '%s\t%s\tretained\n' "$candidate" "$source_epoch" >>"$output"
+      seen="$seen $candidate"
+      count=$((count + 1))
+      [ "$count" -lt "$retained_limit" ] || break
+    done < <(tail -n +2 "$WATCHLIST_FILE")
+  fi
+  while IFS=$'\t' read -r _schema epoch _observed candidate _rest; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in "$primary1"|"$primary2"|"$primary3") continue ;; esac
+    case " $seen " in *" $candidate "*) continue ;; esac
+    printf '%s\t%s\tstaging\n' "$candidate" "$epoch" >>"$output"
+    seen="$seen $candidate"
     count=$((count + 1))
     [ "$count" -lt "$CFIP_AUTO_SYNC_MAX_CANARIES" ] || break
   done < <(tail -n +2 "$STAGING_FILE")
+}
+
+run_canaries() {
+  local plan="$1" count=0 candidate _epoch _source
+  while IFS=$'\t' read -r candidate _epoch _source; do
+    [ -n "$candidate" ] || continue
+    CFIP_ROUTER_CANARY_ALLOWED_FILE="$plan" "$GATE_SCRIPT" canary "$candidate"
+    count=$((count + 1))
+    [ "$count" -lt "$CFIP_AUTO_SYNC_MAX_CANARIES" ] || break
+  done < <(tail -n +2 "$plan")
+}
+
+refresh_watchlist() {
+  local plan="$1" temporary="$WATCHLIST_FILE.tmp.$$" rows="$WATCHLIST_FILE.rows.$$"
+  local candidate source_epoch source result observed minimum average status
+  local previous days previous_min previous_avg previous_observed previous_epoch previous_status
+  local now current_date previous_date retained_limit
+  retained_limit="$(watchlist_limit)"
+  mkdir -p "$(dirname "$WATCHLIST_FILE")"
+  : >"$rows"
+  now="$(current_epoch)"
+  while IFS=$'\t' read -r candidate source_epoch source; do
+    [ -n "$candidate" ] || continue
+    result="$(awk -F '\t' -v ip="$candidate" -v epoch="$source_epoch" \
+      '$2 == ip && $3 == epoch {row=$0} END {print row}' "$CANARY_HISTORY_FILE")"
+    [ -n "$result" ] || die "candidate canary result is missing from history"
+    IFS=$'\t' read -r observed _candidate _source_epoch _round1 _round2 minimum average \
+      _http1 _http2 _bytes1 _bytes2 status _path <<<"$result"
+    [ "$status" = pass ] || continue
+    previous=""
+    if [ -s "$WATCHLIST_FILE" ]; then
+      previous="$(awk -F '\t' -v ip="$candidate" 'NR > 1 && $1 == ip {print; exit}' "$WATCHLIST_FILE")"
+    fi
+    days=1
+    if [ -n "$previous" ]; then
+      IFS=$'\t' read -r _candidate days previous_min previous_avg previous_observed previous_epoch previous_status <<<"$previous"
+      current_date="${observed%% *}"
+      previous_date="${previous_observed%% *}"
+      if [ "$current_date" = "$previous_date" ]; then
+        minimum="$(awk -v a="$previous_min" -v b="$minimum" 'BEGIN {printf "%.2f", a < b ? a : b}')"
+      elif [ "$((now - previous_epoch))" -le "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" ]; then
+        days=$((days + 1))
+        minimum="$(awk -v a="$previous_min" -v b="$minimum" 'BEGIN {printf "%.2f", a < b ? a : b}')"
+        average="$(awk -v old="$previous_avg" -v current="$average" -v days="$days" \
+          'BEGIN {printf "%.2f", ((old * (days - 1)) + current) / days}')"
+      else
+        days=1
+      fi
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\tretained\n' \
+      "$candidate" "$days" "$minimum" "$average" "$observed" "$now" >>"$rows"
+  done < <(tail -n +2 "$plan")
+  printf 'candidate_ip\tconsecutive_pass_days\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tlast_observed_epoch\tstatus\n' >"$temporary"
+  if [ "$retained_limit" -gt 0 ]; then
+    rank_watchlist_rows "$retained_limit" <"$rows" >>"$temporary"
+  fi
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$WATCHLIST_FILE"
+  rm -f "$rows"
 }
 
 run_primary_canaries() {
@@ -201,15 +335,54 @@ run_primary_canaries() {
   done
 }
 choose_qualified_candidates() {
-  local output="$1"
+  local output="$1" plan="${2:-$STAGING_FILE}"
   [ -s "$QUALIFIED_FILE" ] || { : >"$output"; return 0; }
   awk -F '\t' '
-    NR == FNR {if (FNR > 1) current[$4]=1; next}
+    NR == FNR {
+      if (FNR == 1) {candidate_column=($1 == "candidate_ip" ? 1 : 4); next}
+      current[$candidate_column]=1
+      next
+    }
     FNR > 1 && current[$1] && $7 == "competition_qualified" {
       print $1 "\t" $2 "\t" $4 "\t" $5
     }
-  ' "$STAGING_FILE" "$QUALIFIED_FILE" \
+  ' "$plan" "$QUALIFIED_FILE" \
     | rank_candidate_rows 2 >"$output"
+}
+
+rank_watchlist_rows() {
+  local limit="$1"
+  awk -F '\t' -v limit="$limit" '
+    function better(a, b) {
+      if (days[a] != days[b]) return days[a] > days[b]
+      if (minimum[a] != minimum[b]) return minimum[a] > minimum[b]
+      if (average[a] != average[b]) return average[a] > average[b]
+      return candidate[a] < candidate[b]
+    }
+    function swap(a, b, value) {
+      value=row[a]; row[a]=row[b]; row[b]=value
+      value=candidate[a]; candidate[a]=candidate[b]; candidate[b]=value
+      value=days[a]; days[a]=days[b]; days[b]=value
+      value=minimum[a]; minimum[a]=minimum[b]; minimum[b]=value
+      value=average[a]; average[a]=average[b]; average[b]=value
+    }
+    NF >= 4 {
+      count++
+      row[count]=$0
+      candidate[count]=$1
+      days[count]=$2+0
+      minimum[count]=$3+0
+      average[count]=$4+0
+    }
+    END {
+      for (i=1; i<=count; i++) {
+        best=i
+        for (j=i+1; j<=count; j++) if (better(j, best)) best=j
+        if (best != i) swap(i, best)
+      }
+      for (i=1; i<=count && i<=limit; i++) print row[i]
+    }
+  '
 }
 
 rank_candidate_rows() {
@@ -410,7 +583,7 @@ collect_current_records() {
 }
 
 run_sync() {
-  local export_file qualified_file current_records competition_targets primary_targets pending row_count
+  local export_file qualified_file current_records competition_targets primary_targets pending row_count canary_plan
   local target candidate previous_content candidate_min candidate_avg target_source target_kind=""
   local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response apply_enabled
 
@@ -438,6 +611,7 @@ run_sync() {
   competition_targets="$TMP_DIR/competition-targets.tsv"
   primary_targets="$TMP_DIR/primary-targets.tsv"
   pending="$TMP_DIR/pending-target.tsv"
+  canary_plan="$TMP_DIR/canary-plan.tsv"
 
   pull_export "$export_file"
   "$GATE_SCRIPT" import "$export_file"
@@ -445,9 +619,11 @@ run_sync() {
   collect_current_records "$current_records"
   : >"$qualified_file"
   if [ "$row_count" -gt 0 ]; then
-    run_canaries
+    build_canary_plan "$current_records" "$canary_plan"
+    run_canaries "$canary_plan"
     "$GATE_SCRIPT" qualify >/dev/null
-    choose_qualified_candidates "$qualified_file"
+    refresh_watchlist "$canary_plan"
+    choose_qualified_candidates "$qualified_file" "$canary_plan"
   fi
   run_primary_canaries "$current_records"
   "$GATE_SCRIPT" primary-qualify >/dev/null

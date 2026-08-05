@@ -82,6 +82,87 @@ if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then
   echo "challenger outside auto3/auto4 entered primary targets" >&2; exit 1
 fi
 
+GATE_SCRIPT="$ROOT/router-candidate-gate.sh"
+WATCHLIST_FILE="$APP_DIR/router-candidate-watchlist.tsv"
+CANARY_HISTORY_FILE="$APP_DIR/router-candidate-canary-history.tsv"
+CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS=172800
+WATCH_STAGING="$APP_DIR/candidate-staging/watchlist.tsv"
+WATCH_PLAN="$TEST_TMP/watch-plan.tsv"
+WATCH_QUALIFIED="$APP_DIR/watch-qualified.tsv"
+STAGING_FILE="$WATCH_STAGING"
+QUALIFIED_FILE="$WATCH_QUALIFIED"
+TEST_EPOCH=1785859200
+current_epoch() { printf '%s\n' "$TEST_EPOCH"; }
+write_watch_staging() {
+  local epoch="$1" first="$2" second="$3" third="$4"
+  printf '%s\n' 'schema_version	exported_epoch	observed_at	candidate_ip	direct_MBps	round1_MBps	round2_MBps	min_MBps	avg_MBps	http1	http2	status	path_mode	candidate_tier' >"$WATCH_STAGING"
+  for ip in "$first" "$second" "$third"; do
+    printf 'cfip-sidecar-candidates-v2\t%s\t2026-08-01 03:30:00\t%s\t9.00\t4.20\t4.10\t4.10\t4.15\t200\t200\tlow\tsidecar_proxy\tobservation\n' "$epoch" "$ip" >>"$WATCH_STAGING"
+  done
+}
+append_watch_result() {
+  local observed="$1" ip="$2" epoch="$3" minimum="$4" average="$5" status="$6"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t200\t200\t20000000\t20000000\t%s\trouter_isolated_xray\n' \
+    "$observed" "$ip" "$epoch" "$minimum" "$average" "$minimum" "$average" "$status" >>"$CANARY_HISTORY_FILE"
+}
+printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' >"$CANARY_HISTORY_FILE"
+
+write_watch_staging "$TEST_EPOCH" 104.17.2.20 104.17.2.21 104.17.2.22
+build_canary_plan "$CURRENT" "$WATCH_PLAN"
+[ "$(awk 'END {print NR-1}' "$WATCH_PLAN")" -eq 3 ] || { echo "day-one canary count is not three" >&2; exit 1; }
+awk -F '\t' 'NR>1 && $3!="staging"{bad=1} END{exit bad?1:0}' "$WATCH_PLAN" \
+  || { echo "day-one plan did not contain only new candidates" >&2; exit 1; }
+append_watch_result '2026-08-01 04:15:00' 104.17.2.20 "$TEST_EPOCH" 4.50 4.60 pass
+append_watch_result '2026-08-01 04:16:00' 104.17.2.21 "$TEST_EPOCH" 4.30 4.40 pass
+append_watch_result '2026-08-01 04:17:00' 104.17.2.22 "$TEST_EPOCH" 4.10 4.20 pass
+refresh_watchlist "$WATCH_PLAN"
+awk -F '\t' '$1=="104.17.2.20" && $2==1{a=1} $1=="104.17.2.21" && $2==1{b=1} END{exit(a&&b)?0:1}' "$WATCHLIST_FILE" \
+  || { echo "day-one watchlist did not retain the best two candidates" >&2; exit 1; }
+[ "$(awk 'END {print NR-1}' "$WATCHLIST_FILE")" -eq 2 ] || { echo "watchlist exceeded two entries" >&2; exit 1; }
+
+TEST_EPOCH=$((TEST_EPOCH + 86400))
+write_watch_staging "$TEST_EPOCH" 104.17.2.20 104.17.2.23 104.17.2.24
+build_canary_plan "$CURRENT" "$WATCH_PLAN"
+awk -F '\t' 'NR==2 && $1=="104.17.2.20" && $3=="retained"{a=1} NR==3 && $1=="104.17.2.21" && $3=="retained"{b=1} NR==4 && $1=="104.17.2.23" && $3=="staging"{c=1} END{exit(a&&b&&c)?0:1}' "$WATCH_PLAN" \
+  || { echo "day-two plan is not two retained plus one new candidate" >&2; exit 1; }
+[ "$(awk 'END {print NR-1}' "$WATCH_PLAN")" -eq 3 ] || { echo "day-two plan exceeded three candidates" >&2; exit 1; }
+append_watch_result '2026-08-02 04:15:00' 104.17.2.20 "$TEST_EPOCH" 4.40 4.50 pass
+append_watch_result '2026-08-02 04:16:00' 104.17.2.21 "$TEST_EPOCH" 4.20 4.30 pass
+append_watch_result '2026-08-02 04:17:00' 104.17.2.23 "$TEST_EPOCH" 4.80 4.90 pass
+refresh_watchlist "$WATCH_PLAN"
+awk -F '\t' '$1=="104.17.2.20" && $2==2{a=1} $1=="104.17.2.21" && $2==2{b=1} END{exit(a&&b)?0:1}' "$WATCHLIST_FILE" \
+  || { echo "streak priority did not preserve both day-two challengers" >&2; exit 1; }
+
+TEST_EPOCH=$((TEST_EPOCH + 86400))
+write_watch_staging "$TEST_EPOCH" 104.17.2.25 104.17.2.26 104.17.2.27
+build_canary_plan "$CURRENT" "$WATCH_PLAN"
+append_watch_result '2026-08-03 04:15:00' 104.17.2.20 "$TEST_EPOCH" 4.35 4.45 pass
+append_watch_result '2026-08-03 04:16:00' 104.17.2.21 "$TEST_EPOCH" 4.15 4.25 pass
+append_watch_result '2026-08-03 04:17:00' 104.17.2.25 "$TEST_EPOCH" 4.90 5.00 pass
+refresh_watchlist "$WATCH_PLAN"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.2.20\t3\t3\t4.35\t4.52\t2026-08-03 04:15:00\tcompetition_qualified\trouter_isolated_xray\n104.17.2.21\t3\t3\t4.15\t4.32\t2026-08-03 04:16:00\tcompetition_qualified\trouter_isolated_xray\n104.17.2.99\t9\t9\t9.00\t9.00\t2026-08-03 04:17:00\tcompetition_qualified\trouter_isolated_xray\n' >"$WATCH_QUALIFIED"
+choose_qualified_candidates "$TEST_TMP/watch-qualified-current.tsv" "$WATCH_PLAN"
+[ "$(awk 'END {print NR}' "$TEST_TMP/watch-qualified-current.tsv")" -eq 2 ] \
+  || { echo "current-cycle qualification did not return exactly two candidates" >&2; exit 1; }
+if awk -F '\t' '$1=="104.17.2.99"{found=1} END{exit found?0:1}' "$TEST_TMP/watch-qualified-current.tsv"; then
+  echo "orphaned old qualification entered the current DNS plan" >&2; exit 1
+fi
+
+TEST_EPOCH=$((TEST_EPOCH + 86400))
+write_watch_staging "$TEST_EPOCH" 104.17.2.26 104.17.2.27 104.17.2.28
+build_canary_plan "$CURRENT" "$WATCH_PLAN"
+append_watch_result '2026-08-04 04:15:00' 104.17.2.20 "$TEST_EPOCH" 3.20 3.30 low
+append_watch_result '2026-08-04 04:16:00' 104.17.2.21 "$TEST_EPOCH" 4.10 4.20 pass
+append_watch_result '2026-08-04 04:17:00' 104.17.2.26 "$TEST_EPOCH" 4.70 4.80 pass
+refresh_watchlist "$WATCH_PLAN"
+if awk -F '\t' '$1=="104.17.2.20"{found=1} END{exit found?0:1}' "$WATCHLIST_FILE"; then
+  echo "failed retained candidate was not evicted" >&2; exit 1
+fi
+awk -F '\t' '$1=="104.17.2.21"{found=1} END{exit found?0:1}' "$WATCHLIST_FILE" \
+  || { echo "healthy retained candidate was lost" >&2; exit 1; }
+awk -F '\t' '$1=="104.17.2.26"{found=1} END{exit found?0:1}' "$WATCHLIST_FILE" \
+  || { echo "new replacement candidate was not retained" >&2; exit 1; }
+
 CONFIG_FILE="$TEST_TMP/config.env"; AUTO_CONFIG_FILE="$TEST_TMP/auto.env"
 cat >"$CONFIG_FILE" <<'DATA'
 CF_API_TOKEN=dummy
@@ -133,6 +214,11 @@ curl() {
   printf '200'
 }
 sleep() { :; }
+jq() {
+  local last=""
+  for last in "$@"; do :; done
+  grep -q '"success":true' "$last"
+}
 cf_get_record auto.example.test "$CF_REQUEST_TEST_OUTPUT"
 [ "$(wc -l <"$CF_REQUEST_TEST_COUNTER")" -eq 3 ] \
   || { echo "Cloudflare transport retry count is wrong" >&2; exit 1; }

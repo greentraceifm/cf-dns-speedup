@@ -34,6 +34,30 @@ bash "$SCRIPT" import "$V2" | grep -q 'count=1; staging only'
 bash "$SCRIPT" list | grep -q $'^104.17.1.11\t4.00\t4.10\t'
 STAGED="$APP_DIR/candidate-staging/sidecar-candidates.latest.tsv"
 BASELINE_SHA="$(sha256sum "$STAGED" | awk '{print $1}')"
+bash "$SCRIPT" validate-candidate 104.17.1.12
+if bash "$SCRIPT" validate-candidate 203.0.113.9 >/dev/null 2>&1; then
+  echo "non-Cloudflare validate-candidate input was accepted" >&2; exit 1
+fi
+ALLOWED="$TMP_DIR/allowed.tsv"
+printf 'candidate_ip\tsource_export_epoch\tsource\n104.17.1.12\t%s\tretained\n' "$NOW" >"$ALLOWED"
+(
+  export CFIP_ROUTER_CANARY_ALLOWED_FILE="$ALLOWED"
+  # shellcheck disable=SC1090
+  . "$SCRIPT"
+  load_config
+  [ "$(candidate_from_staging 104.17.1.12)" = 104.17.1.12 ]
+  [ "$(candidate_source_epoch 104.17.1.12)" = "$NOW" ]
+) || { echo "retained candidate allowlist was not accepted" >&2; exit 1; }
+printf 'candidate_ip\tsource_export_epoch\tsource\n104.17.1.12\t%s\tretained\n' "$((NOW-1))" >"$TMP_DIR/wrong-epoch.tsv"
+if (
+  export CFIP_ROUTER_CANARY_ALLOWED_FILE="$TMP_DIR/wrong-epoch.tsv"
+  # shellcheck disable=SC1090
+  . "$SCRIPT"
+  load_config
+  candidate_from_staging 104.17.1.12 >/dev/null
+) 2>/dev/null; then
+  echo "allowlist detached from the current export was accepted" >&2; exit 1
+fi
 
 expect_reject() {
   if bash "$SCRIPT" import "$2" >"$TMP_DIR/$1.out" 2>&1; then echo "$1 unexpectedly passed" >&2; exit 1; fi
