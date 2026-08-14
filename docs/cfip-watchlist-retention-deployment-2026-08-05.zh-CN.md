@@ -104,3 +104,37 @@ SRE、安全、工程可靠性和可验证性视角联合评审结论为“有�
 - `.110` 最新自然 Sidecar 服务 `Result=success`、`ExecMainStatus=0`、`MainPID=0`，timer 保持 active；下一周期继续由现有 timer/cron 自然推进，无需人工触发。
 
 结论：挑战者保留、连续三日门控、竞争槽写入、主槽排序和每周期最多一条记录的完整链路已形成生产证据，可以保持现状运行。
+
+## 2026-08-14 最终只读复核与维护入口修复
+
+### CFIP 生产状态
+
+- `.110` 最新自然报告为 `sidecar-observation-20260814-193458.tsv`，共 5 条记录，两个 HTTP 轮次均为 `200`；字段 10 均为 `low`，表示本轮没有达到候选速度门槛，不是任务失败。
+- `cfip-sidecar.service` 自然结束后为 `inactive/dead`、`Result=success`、`ExecMainStatus=0`、`MainPID=0`；timer 保持 enabled/active。
+- Sidecar 锁空闲，无 `/run` Xray JSON、无瞬时 CFIP 容器、`cfip-direct` 附着数为 0。
+- `sub2api`、PostgreSQL、Redis 均为 running/healthy，重启计数为 0；日志上限分别保持 `50m x 3`、`20m x 3`、`20m x 3`。
+- `.110` 根分区使用率 21%，inode 使用率 2%；Ollama 无驻留模型；Google 和 YouTube 均为 HTTP 204。
+
+### VM36 与 Cloudflare
+
+- VM36 最新自动同步状态为 `updated`；竞争槽和主槽写开关均为 1。
+- 生产脚本哈希保持：`router-candidate-gate.sh=67ffa269f04c43bcb86e1f6dd231d6ebeddfbed9c2df9fe88973a7c62cf04f24`，`sidecar-auto-sync.sh=95508b8e8e572c241b078fe417fc28546a25cf667e6dbef9dc9f746920281a4f`。
+- 唯一 `04:15` cron 存在，旧 `06:30` cron 为 0；同步锁文件虽存在，但 `flock` 实测为空闲锁，不是 stale lock 或运行中任务。
+- PassWall 一个 Xray 进程正常承载 `1070/1041/11400/15353`，VM36 Google/YouTube 均为 HTTP 204。
+- `auto` 至 `auto4` 在 `192.168.1.1`、`192.168.1.254`、`1.1.1.1` 三路解析完全一致，并与 Cloudflare 只读 GET 内容一致。
+- 本轮没有手工启动 Sidecar、扫描、诊断或自动同步，没有修改 Cloudflare、DNS、门槛、cron、timer、PassWall 或路由。
+
+### OpenClaw 维护入口
+
+- 旧 `/home/ubuntu/.openclaw/tools/ssh_ollama.expect` 仍直连 `ollama@192.168.1.110`，与当前仅允许密钥别名的访问方式不兼容，会报 `Permission denied (publickey)`。
+- 已备份旧文件并原子切换为 `ollama-server` SSH 别名，强制 `StrictHostKeyChecking=yes` 和固定 known_hosts；新文件权限为 `0600`，SHA256 为 `ba0cfde72d287c55c62ea475c9c555c466c730f292716d3d57943fd12080bea3`。
+- 回滚文件：`ssh_ollama.expect.pre-alias-fix-20260814` 和 `ssh_ollama.expect.pre-no-password-prompt-20260814`。
+- 首版验证发现 expect PTY 不适合承载 `sudo -S`：输入可能被终端回显到内部命令转录。最终版本已禁止所有交互密码提示，只负责密钥 SSH；root 操作继续使用既有的 sudo-stdin 包装器。记录不包含凭据值。
+
+### 时间标签边界
+
+`.140` 和 VM36 本轮输出了 `2026-08-15` 主机时间。按当前权威日期 `2026-08-14`，这些未来时间标签只视为主机时钟偏差，不用于连续日期门控或自然周期证据；本次有效自然报告仍以 `sidecar-observation-20260814-193458.tsv` 为准。本次未自动校时。
+
+### 结论
+
+CFIP 生产链路继续保持健康。本轮没有发现需要调整候选门槛、扫描规模、五槽策略或 PassWall 的新缺陷。维护入口的重复连接故障及密码提示回显路径已经封堵；由于凭据曾进入内部工具转录，是否轮换维护凭据应作为独立安全决定，不在本次无停机收口中自动执行。
