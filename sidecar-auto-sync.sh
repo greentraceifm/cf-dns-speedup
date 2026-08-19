@@ -496,6 +496,7 @@ build_primary_targets() {
       for (i=1; i<=primary_count; i++) {
         ip=records[primary_record[i]]
         if (ip == "") exit 4
+        if (ip in current_primary) duplicate_primary=1
         current_primary[ip]=1
         if (ip in p_min) {
           pool[ip]=1; days[ip]=p_days[ip]; minimum[ip]=p_min[ip]; average[ip]=p_avg[ip]; source[ip]="primary_history"
@@ -511,8 +512,13 @@ build_primary_targets() {
         ip=records[competition_record[i]]
         if (ip == "" || (ip in current_primary) || !(ip in c_min)) continue
         if (c_min[ip] < primary_min) continue
-        if ((c_min[ip] * 100) + 0.0001 < weak_min * (100 + improvement)) continue
-        pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="challenger"
+        if (duplicate_primary) {
+          if (c_min[ip] <= weak_min) continue
+          pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="duplicate_repair"
+        } else {
+          if ((c_min[ip] * 100) + 0.0001 < weak_min * (100 + improvement)) continue
+          pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="challenger"
+        }
       }
       for (ip in pool)
         printf "%s\t%d\t%.2f\t%.2f\t%s\n", ip, days[ip], minimum[ip], average[ip], source[ip]
@@ -531,6 +537,46 @@ build_primary_targets() {
   while IFS=$'\t' read -r candidate days minimum average source; do
     winners+=("$candidate"); mins+=("$minimum"); avgs+=("$average"); sources+=("$source")
   done <"$ranked"
+  local duplicate_primary=0 seen_current="" current_candidate row
+  for name in "${primary_names[@]}"; do
+    current_candidate="$(record_content "$current_records" "$name")"
+    case " $seen_current " in
+      *" $current_candidate "*) duplicate_primary=1 ;;
+      *) seen_current="$seen_current $current_candidate" ;;
+    esac
+  done
+  if [ "$duplicate_primary" -eq 1 ]; then
+    local assigned="" selected_candidate selected_days selected_min selected_avg selected_source
+    : >"$output"
+    for name in "${primary_names[@]}"; do
+      current_candidate="$(record_content "$current_records" "$name")"
+      case " $assigned " in
+        *" $current_candidate "*)
+          selected_candidate=""; selected_days=""; selected_min=""; selected_avg=""; selected_source=""
+          while IFS=$'\t' read -r candidate days minimum average source; do
+            case " $assigned " in *" $candidate "*) continue ;; esac
+            selected_candidate="$candidate"; selected_days="$days"; selected_min="$minimum"
+            selected_avg="$average"; selected_source="$source"; break
+          done <"$ranked"
+          [ -n "$selected_candidate" ] || { rm -f "$pool" "$ranked"; return 0; }
+          printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$selected_candidate" "$selected_min" \
+            "$selected_avg" "$selected_source" >>"$output"
+          assigned="$assigned $selected_candidate"
+          ;;
+        *)
+          row="$(awk -F '\t' -v ip="$current_candidate" '$1 == ip {print; exit}' "$ranked")"
+          [ -n "$row" ] || { rm -f "$pool" "$ranked"; return 0; }
+          IFS=$'\t' read -r selected_candidate selected_days selected_min selected_avg selected_source <<<"$row"
+          printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$selected_candidate" "$selected_min" \
+            "$selected_avg" "$selected_source" >>"$output"
+          assigned="$assigned $selected_candidate"
+          ;;
+      esac
+    done
+    PRIMARY_BASELINE_READY=1
+    rm -f "$pool" "$ranked"
+    return 0
+  fi
   for index in 0 1 2; do
     name="${primary_names[$index]}"
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "${winners[$index]}" "${mins[$index]}" \

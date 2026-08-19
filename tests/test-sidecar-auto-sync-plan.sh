@@ -87,6 +87,17 @@ if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then
   echo "challenger outside auto3/auto4 entered primary targets" >&2; exit 1
 fi
 
+DUPLICATE_CURRENT="$TEST_TMP/duplicate-current.tsv"
+printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.153.15\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.135.183\nauto4.example.test\t104.17.153.186\n' >"$DUPLICATE_CURRENT"
+DUPLICATE_PRIMARY="$TEST_TMP/duplicate-primary.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.153.15\t7\t7\t4.19\t4.32\t2026-08-19 04:16:01\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t7\t7\t4.14\t4.40\t2026-08-19 04:16:13\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$DUPLICATE_PRIMARY"
+DUPLICATE_COMPETITION="$TEST_TMP/duplicate-competition.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.135.183\t7\t7\t4.20\t4.38\t2026-08-19 04:15:27\tcompetition_qualified\trouter_isolated_xray\n104.17.153.186\t7\t7\t4.06\t4.33\t2026-08-19 04:15:38\tcompetition_qualified\trouter_isolated_xray\n' >"$DUPLICATE_COMPETITION"
+build_primary_targets "$DUPLICATE_CURRENT" "$DUPLICATE_PRIMARY" "$DUPLICATE_COMPETITION" "$PRIMARY_TARGETS"
+[ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "duplicate primary repair was not accepted" >&2; exit 1; }
+awk -F '\t' '$1=="auto.example.test" && $2=="104.17.153.15"{a=1} $1=="auto1.example.test" && $2=="104.17.135.183" && $5=="duplicate_repair"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
+  || { echo "duplicate primary repair target is wrong" >&2; exit 1; }
+
 GATE_SCRIPT="$ROOT/router-candidate-gate.sh"
 WATCHLIST_FILE="$APP_DIR/router-candidate-watchlist.tsv"
 CANARY_HISTORY_FILE="$APP_DIR/router-candidate-canary-history.tsv"
