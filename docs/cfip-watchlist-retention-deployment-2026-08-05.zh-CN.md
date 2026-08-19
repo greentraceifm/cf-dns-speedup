@@ -138,3 +138,38 @@ SRE、安全、工程可靠性和可验证性视角联合评审结论为“有�
 ### 结论
 
 CFIP 生产链路继续保持健康。本轮没有发现需要调整候选门槛、扫描规模、五槽策略或 PassWall 的新缺陷。维护入口的重复连接故障及密码提示回显路径已经封堵；由于凭据曾进入内部工具转录，是否轮换维护凭据应作为独立安全决定，不在本次无停机收口中自动执行。
+
+## 2026-08-19 主槽池不足异常退出修复
+
+### 故障现象与根因
+
+- VM36 的唯一 `04:15` cron 在 2026-08-17、2026-08-18 和 2026-08-19 均已正常触发；候选导入、3 个竞争候选 canary 和 2 个主槽 canary 实际完成。
+- `sidecar-auto-sync.latest.tsv`、history 和 state 却停在 2026-08-16，原因不是 cron 漏跑，而是主槽排序阶段输出 `ERROR: primary ranking pool has fewer than three qualified IPs` 后异常退出。
+- 当前只有 2 个主槽 IP 形成完整三日同路径基线时，代码把“排序池不足 3 个”误判为致命错误。按既有设计，这种状态应保持 `PRIMARY_BASELINE_READY=0`，安全返回并记录 `awaiting_primary_baseline`，不得中断整轮状态收口。
+- 该缺陷没有产生错误的 Cloudflare 写入，五条 DNS 记录和 PassWall 运行拓扑均未被改变，故障安全边界有效。
+
+### 修复与测试
+
+- `build_primary_targets()` 在主槽排序池不足 3 个时改为清理临时文件并正常返回，不再调用 `die`。
+- 新增两条主槽资格数据的回归场景，要求 `PRIMARY_BASELINE_READY=0` 且主槽目标文件为空，证明该状态会安全失败关闭。
+- `tests/test-sidecar-auto-sync-plan.sh` 和全项目回归测试通过；现有 `3.5 MB/s` 竞争门槛、`4.0 MB/s` 主槽门槛、`25%` 改善条件、连续三日门控和每周期最多一条 Cloudflare 写入规则均未改变。
+
+### 生产部署与即时验收
+
+部署时间：2026-08-19 12:28 CST。
+
+- 旧生产脚本 SHA256：`95508b8e8e572c241b078fe417fc28546a25cf667e6dbef9dc9f746920281a4f`。
+- 新生产脚本 SHA256：`852890f5e6f1b9c7c22cfe2444b880dc2530fa473a86ae9f9cce87b549d8360f`。
+- VM36 root-only 回滚目录：`/root/openwrt-backup/cfip-primary-pool-shortfall-20260819-122841`。
+- 部署使用旧哈希硬门控、三把项目锁、VM36 本机回归测试、root-only 备份和原子替换；没有手工运行 Sidecar 或 `sidecar-auto-sync.sh run`。
+- PassWall 重启 0 次，cron 变化 0，Cloudflare 写入 0；一个 Xray 进程和 `1070/1041/11400/15353` 四监听保持正常。
+- 五条记录在 `192.168.1.1`、`192.168.1.254`、`1.1.1.1` 三路解析一致，Cloudflare 五条只读 GET 成功，VM36、OpenClaw 和 Sidecar 的 Google/YouTube HTTP 均正常。
+- `.110` 最新自然 Sidecar 周期 `Result=success`、`ExecMainStatus=0`、`MainPID=0`，共 5 条双轮 HTTP 200 结果并导出 3 个 observation 候选；锁、Xray JSON、瞬时容器和 `cfip-direct` 均无残留，三个必要容器 healthy，Ollama idle。
+
+### 下一自然周期
+
+不补跑 2026-08-19 的自动同步。等待 2026-08-20 04:15 CST 的自然任务验证：
+
+- 主槽基线仍不足 3 个时，`sidecar-auto-sync.latest.tsv` 应刷新为 `awaiting_primary_baseline`，不再出现主槽排序池不足异常；
+- 若届时已形成 3 个完整主槽基线，则按原有排序和单记录写入规则正常推进；
+- 两种结果均不得绕过连续三日、速度门槛或每周期单条写入限制。

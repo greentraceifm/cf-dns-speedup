@@ -72,6 +72,11 @@ build_primary_targets "$PROMOTION_CURRENT" "$TEST_TMP/empty-primary-qualified.ts
 [ "$PRIMARY_BASELINE_READY" -eq 0 ] && [ ! -s "$PRIMARY_TARGETS" ] \
   || { echo "incomplete primary baseline did not fail closed" >&2; exit 1; }
 
+head -n 3 "$PRIMARY_QUALIFIED" >"$TEST_TMP/two-primary-qualified.tsv"
+build_primary_targets "$PROMOTION_CURRENT" "$TEST_TMP/two-primary-qualified.tsv" "$PROMOTION_QUALIFIED" "$PRIMARY_TARGETS"
+[ "$PRIMARY_BASELINE_READY" -eq 0 ] && [ ! -s "$PRIMARY_TARGETS" ] \
+  || { echo "undersized primary ranking pool did not fail closed" >&2; exit 1; }
+
 sed 's/104.17.1.10\t3\t3\t5.10/104.17.1.10\t3\t3\t4.99/' "$PROMOTION_QUALIFIED" >"$TEST_TMP/below-improvement.tsv"
 build_primary_targets "$PROMOTION_CURRENT" "$PRIMARY_QUALIFIED" "$TEST_TMP/below-improvement.tsv" "$PRIMARY_TARGETS"
 if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then

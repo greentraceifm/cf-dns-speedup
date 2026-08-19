@@ -527,7 +527,7 @@ build_primary_targets() {
 
   rank_candidate_rows 3 <"$pool" >"$ranked"
   [ "$(awk 'END {print NR + 0}' "$ranked")" -eq 3 ] \
-    || { rm -f "$pool" "$ranked"; die "primary ranking pool has fewer than three qualified IPs"; }
+    || { rm -f "$pool" "$ranked"; return 0; }
   while IFS=$'\t' read -r candidate days minimum average source; do
     winners+=("$candidate"); mins+=("$minimum"); avgs+=("$average"); sources+=("$source")
   done <"$ranked"
