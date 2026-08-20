@@ -65,6 +65,14 @@ expect_reject() {
 }
 write_v2 "$TMP_DIR/stale.tsv" "$((NOW-172801))" 104.17.1.12 4.20 4.00 4.00 4.10 low observation
 expect_reject stale "$TMP_DIR/stale.tsv"
+write_v2 "$TMP_DIR/auto-sync-stale.tsv" "$((NOW-21601))" 104.17.1.12 4.20 4.00 4.00 4.10 low observation
+if CFIP_IMPORT_MAX_AGE_SECONDS=21600 bash "$SCRIPT" import "$TMP_DIR/auto-sync-stale.tsv" \
+  >"$TMP_DIR/auto_sync_stale.out" 2>&1; then
+  echo "auto-sync stale export unexpectedly passed" >&2
+  exit 1
+fi
+[ "$(sha256sum "$STAGED" | awk '{print $1}')" = "$BASELINE_SHA" ] \
+  || { echo "auto-sync stale import changed staging" >&2; exit 1; }
 write_v2 "$TMP_DIR/non-cf.tsv" "$NOW" 203.0.113.9 4.20 4.00 4.00 4.10 low observation
 expect_reject non_cf "$TMP_DIR/non-cf.tsv"
 write_v2 "$TMP_DIR/below-floor.tsv" "$NOW" 104.17.1.12 3.50 3.40 3.40 3.45 low observation
@@ -91,6 +99,15 @@ add_history() {
   printf '%s\t104.17.1.10\t%s\t%s\t%s\t%s\t%s\t200\t200\t20000000\t20000000\t%s\trouter_isolated_xray\n' \
     "$1" "$2" "$3" "$4" "$5" "$6" "$7" >>"$HISTORY"
 }
+REPEATED_EPOCH="$((NOW-100))"
+add_history "$(date -d '2 days ago' '+%F 03:40:00')" "$REPEATED_EPOCH" 4.30 4.20 4.20 4.25 pass
+add_history "$(date -d '1 day ago' '+%F 03:40:00')" "$REPEATED_EPOCH" 4.30 4.20 4.20 4.25 pass
+add_history "$(date '+%F 03:40:00')" "$REPEATED_EPOCH" 4.30 4.20 4.20 4.25 pass
+bash "$SCRIPT" qualify | grep -q 'competition_qualified_count=0'
+[ "$(awk 'END {print NR}' "$QUALIFIED")" -eq 1 ] \
+  || { echo "one Sidecar export was counted as three qualification days" >&2; exit 1; }
+
+printf 'observed_at\tcandidate_ip\tsource_export_epoch\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tbytes1\tbytes2\tstatus\tpath_mode\n' >"$HISTORY"
 add_history "$(date -d '5 days ago' '+%F 03:40:00')" "$((NOW-432000))" 4.10 4.00 4.00 4.05 pass
 add_history "$(date -d '4 days ago' '+%F 03:40:00')" "$((NOW-345600))" 4.20 4.10 4.10 4.15 pass
 add_history "$(date -d '3 days ago' '+%F 03:40:00')" "$((NOW-259200))" 3.40 3.30 3.30 3.35 low

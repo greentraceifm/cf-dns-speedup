@@ -9,6 +9,7 @@ STAGING_DIR="${CFIP_CANDIDATE_STAGING_DIR:-$APP_DIR/candidate-staging}"
 STAGING_FILE="$STAGING_DIR/sidecar-candidates.latest.tsv"
 IMPORT_REPORT_FILE="$STAGING_DIR/import.latest.tsv"
 LOCK_FILE="${CFIP_CANDIDATE_GATE_LOCK:-/tmp/cfip-candidate-gate.lock}"
+PASSWALL_OBSERVE_LOCK="${CFST_PASSWALL_NODE_OBSERVE_LOCK:-/tmp/cf-dns-speedup-passwall-node-observe.lock}"
 SCHEMA_VERSION_V1="cfip-sidecar-candidates-v1"
 SCHEMA_VERSION_V2="cfip-sidecar-candidates-v2"
 EXPECTED_HEADER_V1=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
@@ -58,7 +59,7 @@ need_cmd() {
 
 load_config() {
   [ ! -r "$CONFIG_FILE" ] || . "$CONFIG_FILE"
-  CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS="${CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS:-172800}"
+  CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS="${CFIP_IMPORT_MAX_AGE_SECONDS:-${CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS:-172800}}"
   CFIP_ROUTER_CANARY_MIN_MBPS="${CFIP_ROUTER_CANARY_MIN_MBPS:-$HARD_OBSERVATION_MIN_MBPS}"
   CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS="${CFIP_ROUTER_PRIMARY_CANARY_MIN_MBPS:-4.0}"
   [[ "$CFIP_SIDECAR_EXPORT_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] \
@@ -135,6 +136,7 @@ assert_pids_alive() {
 
 main_project_lock_busy() {
   local lock="${1:-/tmp/cf-dns-speedup.lock}"
+  [ ! -L "$lock" ] || return 0
   [ -e "$lock" ] || return 1
   [ -d "$lock" ] && return 0
   [ -f "$lock" ] || return 0
@@ -143,7 +145,12 @@ main_project_lock_busy() {
 }
 
 assert_no_project_lock() {
-  main_project_lock_busy && die "main CFIP project lock is busy; canary stopped before start"
+  if main_project_lock_busy; then
+    die "main CFIP project lock is busy; canary stopped before start"
+  fi
+  if main_project_lock_busy "$PASSWALL_OBSERVE_LOCK"; then
+    die "PassWall observation lock is busy; canary stopped before start"
+  fi
 }
 
 assert_no_canary_residue() {
@@ -329,7 +336,7 @@ refresh_qualified_report() {
     }
     function finalize_day(ip) {
       if (day_date[ip] == "") return
-      if (day_ok[ip] && day_rows[ip] > 0 && day_min[ip] >= minimum) {
+      if (day_ok[ip] && day_rows[ip] > 0 && day_exports[ip] > 0 && day_min[ip] >= minimum) {
         streak[ip]++
         streak_exports[ip] += day_exports[ip]
         if (streak_min[ip] == "" || day_min[ip] < streak_min[ip]) streak_min[ip]=day_min[ip]
@@ -351,7 +358,7 @@ refresh_qualified_report() {
       if (day_min[ip] == "" || ($6 + 0) < day_min[ip]) day_min[ip]=$6+0
       day_avg_sum[ip]+=$7+0
       day_latest[ip]=$1
-      source_key=ip SUBSEP date SUBSEP $3
+      source_key=ip SUBSEP $3
       if (!source_seen[source_key]++) day_exports[ip]++
     }
     END {

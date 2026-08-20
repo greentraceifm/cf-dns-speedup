@@ -5,6 +5,8 @@ umask 077
 APP_DIR="${APP_DIR:-/root/cf-dns-speedup}"
 LOCK_DIR="${CFST_PASSWALL_NODE_OBSERVE_LOCK:-/tmp/cf-dns-speedup-passwall-node-observe.lock}"
 MAIN_LOCK_DIR="${LOCK_DIR_MAIN:-/tmp/cf-dns-speedup.lock}"
+SIDECAR_SYNC_LOCK="${CFIP_AUTO_SYNC_LOCK_FILE:-/tmp/cfip-sidecar-auto-sync.lock}"
+CANDIDATE_GATE_LOCK="${CFIP_CANDIDATE_GATE_LOCK:-/tmp/cfip-candidate-gate.lock}"
 REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
 HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
@@ -58,21 +60,41 @@ ensure_history_file() {
 }
 
 cleanup() {
-  rmdir "$LOCK_DIR" 2>/dev/null || true
+  flock -u 8 2>/dev/null || true
+  exec 8>&-
 }
 trap cleanup EXIT
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+lock_busy() {
+  local lock="$1"
+  [ ! -L "$lock" ] || return 0
+  [ -e "$lock" ] || return 1
+  [ -d "$lock" ] && return 0
+  [ -f "$lock" ] || return 0
+  flock -n "$lock" -c true >/dev/null 2>&1 && return 1
+  return 0
+}
+
+if [ -L "$LOCK_DIR" ] || { [ -e "$LOCK_DIR" ] && [ ! -f "$LOCK_DIR" ]; }; then
+  log "skip: passwall node observe lock type is unsafe"
+  exit 0
+fi
+exec 8>"$LOCK_DIR"
+if ! flock -n 8; then
   log "skip: passwall node observe already running"
   exit 0
 fi
 
-if [ -d "$MAIN_LOCK_DIR" ]; then
-  log "skip: cf-dns-speedup main lock exists"
-  exit 0
-fi
+for peer in "$MAIN_LOCK_DIR" "$SIDECAR_SYNC_LOCK" "$CANDIDATE_GATE_LOCK"; do
+  if lock_busy "$peer"; then
+    log "skip: coordinated CFIP lock is busy: $peer"
+    exit 0
+  fi
+done
 
 cd "$APP_DIR"
+
+export CFST_PASSWALL_NODE_OBSERVE_OWNER=1
 
 CFST_PASSWALL_NODE_TEST_URL="${CFST_PASSWALL_NODE_TEST_URL:-https://speed.cloudflare.com/__down?bytes=5242880}" \
 CFST_PASSWALL_NODE_CONNECT_TIMEOUT="${CFST_PASSWALL_NODE_CONNECT_TIMEOUT:-8}" \

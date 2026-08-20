@@ -37,6 +37,9 @@ LOG_FILE="${LOG_FILE:-$APP_DIR/run.log}"
 INFORM_LOG="${INFORM_LOG:-$APP_DIR/informlog}"
 CFST_RAW_LOG="${CFST_RAW_LOG:-$APP_DIR/cfst-output.log}"
 LOCK_DIR="${LOCK_DIR:-/tmp/cf-dns-speedup.lock}"
+SIDECAR_SYNC_LOCK="${CFIP_AUTO_SYNC_LOCK_FILE:-/tmp/cfip-sidecar-auto-sync.lock}"
+CANDIDATE_GATE_LOCK="${CFIP_CANDIDATE_GATE_LOCK:-/tmp/cfip-candidate-gate.lock}"
+PASSWALL_OBSERVE_LOCK="${CFST_PASSWALL_NODE_OBSERVE_LOCK:-/tmp/cf-dns-speedup-passwall-node-observe.lock}"
 LAST_RUN_SUMMARY="${LAST_RUN_SUMMARY:-$APP_DIR/last-run.summary}"
 LAST_RUN_JSON="${LAST_RUN_JSON:-$APP_DIR/last-run.json}"
 LOG_MAX_KB="${LOG_MAX_KB:-1024}"
@@ -336,33 +339,60 @@ rotate_logs() {
 }
 
 acquire_lock() {
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    LOCK_ACQUIRED=1
-    printf '%s\n' "$$" > "$LOCK_DIR/pid"
-    printf '%s\n' "$(date '+%F %T')" > "$LOCK_DIR/started_at"
-    return 0
+  local pid="" peer
+  need_cmd flock
+  [ ! -L "$LOCK_DIR" ] || die "主锁不能是符号链接：$LOCK_DIR"
+  if [ -d "$LOCK_DIR" ]; then
+    [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      log "已有旧版任务正在运行：pid=$pid，退出以避免重复执行"
+      exit 0
+    fi
+    log "检测到陈旧的旧版目录锁：$LOCK_DIR，迁移为文件锁"
+    rm -rf "$LOCK_DIR"
+  elif [ -e "$LOCK_DIR" ] && [ ! -f "$LOCK_DIR" ]; then
+    die "主锁类型不安全：$LOCK_DIR"
   fi
 
-  local pid=""
-  [ -f "$LOCK_DIR/pid" ] && pid="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-    log "已有任务正在运行：pid=$pid，退出以避免重复执行"
+  exec 9>"$LOCK_DIR" || die "无法打开主锁：$LOCK_DIR"
+  if ! flock -n 9; then
+    log "已有任务正在运行，退出以避免重复执行"
+    exec 9>&-
     exit 0
   fi
-
-  log "检测到陈旧锁：$LOCK_DIR，清理后重新加锁"
-  rm -rf "$LOCK_DIR"
-  mkdir "$LOCK_DIR" || die "无法创建锁目录：$LOCK_DIR"
   LOCK_ACQUIRED=1
-  printf '%s\n' "$$" > "$LOCK_DIR/pid"
-  printf '%s\n' "$(date '+%F %T')" > "$LOCK_DIR/started_at"
+  printf 'pid=%s\nstarted_at=%s\n' "$$" "$(date '+%F %T')" >&9
+
+  for peer in "$SIDECAR_SYNC_LOCK" "$CANDIDATE_GATE_LOCK"; do
+    if project_file_lock_busy "$peer"; then
+      log "Sidecar 协调锁正在使用：$peer，退出以避免并发执行"
+      release_lock
+      exit 0
+    fi
+  done
+  if [ "${CFST_PASSWALL_NODE_OBSERVE_OWNER:-0}" != 1 ] \
+    && project_file_lock_busy "$PASSWALL_OBSERVE_LOCK"; then
+    log "PassWall 观察协调锁正在使用：$PASSWALL_OBSERVE_LOCK，退出以避免并发执行"
+    release_lock
+    exit 0
+  fi
 }
 
 release_lock() {
   if [ "$LOCK_ACQUIRED" = "1" ]; then
-    rm -rf "$LOCK_DIR"
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
     LOCK_ACQUIRED=0
   fi
+}
+
+project_file_lock_busy() {
+  local lock="$1"
+  [ ! -L "$lock" ] || return 0
+  [ -e "$lock" ] || return 1
+  [ -f "$lock" ] || return 0
+  flock -n "$lock" -c true >/dev/null 2>&1 && return 1
+  return 0
 }
 
 json_escape() {

@@ -58,6 +58,24 @@ verify_lock_semantics() {
     exit 1
   fi
   rmdir "$lock"
+
+  : >"$TEST_TMP/symlink-target"
+  ln -s "$TEST_TMP/symlink-target" "$lock"
+  if [ -L "$lock" ]; then
+    if ! main_project_lock_busy "$lock"; then
+      echo "symlink main project lock was reported free: $script" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$lock" "$TEST_TMP/symlink-target"
+
+  if ln -s "$TEST_TMP/missing-target" "$lock" 2>/dev/null; then
+    if ! main_project_lock_busy "$lock"; then
+      echo "dangling symlink main project lock was reported free: $script" >&2
+      exit 1
+    fi
+  fi
+  rm -f "$lock"
 }
 
 verify_lock_semantics "$ROOT/sidecar-auto-sync.sh"

@@ -15,6 +15,7 @@ REPORT_FILE="${CFIP_AUTO_SYNC_REPORT_FILE:-$APP_DIR/sidecar-auto-sync.latest.tsv
 HISTORY_FILE="${CFIP_AUTO_SYNC_HISTORY_FILE:-$APP_DIR/sidecar-auto-sync-history.tsv}"
 STATE_FILE="${CFIP_AUTO_SYNC_STATE_FILE:-$APP_DIR/sidecar-auto-sync.state}"
 LOCK_FILE="${CFIP_AUTO_SYNC_LOCK_FILE:-/tmp/cfip-sidecar-auto-sync.lock}"
+PASSWALL_OBSERVE_LOCK="${CFST_PASSWALL_NODE_OBSERVE_LOCK:-/tmp/cf-dns-speedup-passwall-node-observe.lock}"
 
 REMOTE_HOST="${CFIP_AUTO_SYNC_REMOTE_HOST:-ollama@192.168.1.110}"
 REMOTE_COMMAND="${CFIP_AUTO_SYNC_REMOTE_COMMAND:-read-cfip-export}"
@@ -26,6 +27,7 @@ CFIP_AUTO_SYNC_RECORDS="${CFIP_AUTO_SYNC_RECORDS:-}"
 CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
 CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
 CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS:-172800}"
+CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS:-21600}"
 CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
 CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
 CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
@@ -45,6 +47,7 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 
 main_project_lock_busy() {
   local lock="${1:-/tmp/cf-dns-speedup.lock}"
+  [ ! -L "$lock" ] || return 0
   [ -e "$lock" ] || return 1
   [ -d "$lock" ] && return 0
   [ -f "$lock" ] || return 0
@@ -121,6 +124,7 @@ load_config() {
   CFIP_AUTO_SYNC_PRIMARY_RECORDS="${CFIP_AUTO_SYNC_PRIMARY_RECORDS:-}"
   CFIP_AUTO_SYNC_MAX_CANARIES="${CFIP_AUTO_SYNC_MAX_CANARIES:-3}"
   CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS:-172800}"
+  CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS="${CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS:-21600}"
   CFIP_AUTO_SYNC_MIN_MBPS="${CFIP_AUTO_SYNC_MIN_MBPS:-3.5}"
   CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS="${CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS:-4.0}"
   CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT="${CFIP_AUTO_SYNC_PRIMARY_IMPROVEMENT_PERCENT:-25}"
@@ -141,6 +145,10 @@ load_config() {
     && [ "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" -ge 86400 ] \
     && [ "$CFIP_AUTO_SYNC_WATCHLIST_MAX_AGE_SECONDS" -le 604800 ] \
     || die "watchlist max age must be between 86400 and 604800 seconds"
+  [[ "$CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS" =~ ^[0-9]+$ ]] \
+    && [ "$CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS" -ge 1800 ] \
+    && [ "$CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS" -le 43200 ] \
+    || die "automatic sync export max age must be between 1800 and 43200 seconds"
   decimal_at_least "$CFIP_AUTO_SYNC_MIN_MBPS" 3.5 \
     || die "automatic sync threshold cannot be below 3.5 MB/s"
   decimal_at_least "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" 4.0 \
@@ -649,7 +657,12 @@ run_sync() {
   mkdir -p "$APP_DIR"
   exec 9>"$LOCK_FILE"
   flock -n 9 || die "another sidecar auto sync is running"
-  main_project_lock_busy && die "main CFIP project lock is busy"
+  if main_project_lock_busy; then
+    die "main CFIP project lock is busy"
+  fi
+  if main_project_lock_busy "$PASSWALL_OBSERVE_LOCK"; then
+    die "PassWall observation lock is busy"
+  fi
 
   baseline_pids="$(snapshot_xray_pids)"
   baseline_listeners="$(snapshot_xray_listeners)"
@@ -669,7 +682,8 @@ run_sync() {
   canary_plan="$TMP_DIR/canary-plan.tsv"
 
   pull_export "$export_file"
-  "$GATE_SCRIPT" import "$export_file"
+  CFIP_IMPORT_MAX_AGE_SECONDS="$CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS" \
+    "$GATE_SCRIPT" import "$export_file"
   row_count="$(awk 'NR > 1 {count++} END {print count + 0}' "$STAGING_FILE")"
   collect_current_records "$current_records"
   : >"$qualified_file"

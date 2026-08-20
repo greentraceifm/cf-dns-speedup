@@ -241,3 +241,40 @@ CFIP 生产链路继续保持健康。本轮没有发现需要调整候选门槛
 - VM36 应消费当天完成的新导出并刷新同步报告；
 - 若重复主槽修复满足既有资格与单记录门控，可自然更新一条主槽；否则应记录安全等待状态；
 - 最终仍需确认 `auto`、`auto1`、`auto2` 去重、五条 DNS 三路一致和 PassWall 实际连通性，之后才能完成该缺陷的自然周期收口。
+
+## 2026-08-20 全面锁协议与重复消费审计修复
+
+### 审计发现
+
+- 主项目仍使用旧式 `mkdir` 目录锁，而 Sidecar 自动同步、候选门控已使用文件 `flock`；混合协议会让不同执行面无法可靠识别彼此是否真实运行。
+- `passwall-node-observe.sh` 持有观察锁后调用主脚本，缺少合法嵌套调用标识，可能被新的协调检查误判为并发任务。
+- 同一个 Sidecar `source_export_epoch` 若被跨日重复复测，旧资格统计可能把同一份导出累计成多个有效日期。
+- 自动同步缺少独立的短时导出有效期，异常 cron 有机会再次消费上一日导出。
+- 第一版锁修复中的 `busy && die` 会在 `set -e` 环境把“锁空闲”的返回码 1 误当作脚本失败；VM36 BusyBox 也不支持测试夹具使用的 `sleep 0.1`。
+
+### 最小修复范围
+
+- `cf-dns-speedup.sh` 主锁改为文件 `flock`，兼容并迁移陈旧旧式目录锁；活动旧任务、符号链接和异常锁类型继续故障安全阻断。
+- 主脚本、Sidecar 自动同步、候选门控和 PassWall 观察任务统一检查四把协调锁；观察脚本通过 `CFST_PASSWALL_NODE_OBSERVE_OWNER=1` 标识合法的内部嵌套调用。
+- 竞争和主槽资格按 `source_export_epoch` 去重，同一导出不能跨日期累积资格。
+- 自动同步默认只接受最近 `21600` 秒内的 Sidecar 导出；该限制不改变 3.5/4.0 MB/s 门槛、连续三日门控、25% 改善条件、五槽策略或单周期最多一条写入规则。
+- 将锁判断改为显式 `if`，并把 BusyBox 测试等待改为整数秒。
+
+### 测试、部署和回滚
+
+- `.140` 真实 Linux 环境重新执行全项目回归，结果为 `all project regression tests passed` 和 `all sidecar tests passed`；主锁语义、四锁协调、router canary、候选门控、自动同步计划及语法检查均通过。
+- VM36 于 2026-08-20 11:41 CST 完成四脚本原子部署；生产哈希为：
+  - `cf-dns-speedup.sh`：`b1a9154d866e44aa69bff62ae3f49237016f08edb91541872eb101a7bbb45f10`
+  - `passwall-node-observe.sh`：`bd95b440a1f2a6bc91a61f80cc05ae5d013788c9253fef7a02ce194604e26f36`
+  - `sidecar-auto-sync.sh`：`c0ed8ac2a1bbc33845ec5e525afc49dddba703cc5653996b4af6b09f8eaac380`
+  - `router-candidate-gate.sh`：`74be18ac4e9c8a3a1b67a2f29d3bb424d912bab1e599f43ac8c49184fe047971`
+- root-only 回滚目录：`/root/openwrt-backup/cfip-full-lock-audit-fix-20260820-114136`。
+- 部署没有重启 PassWall，没有运行 Sidecar、canary 或自动同步，没有写 Cloudflare，也没有修改 04:35 cron、DNS、门槛、池、订阅、路由或防火墙。
+- 独立只读后检确认：四脚本哈希一致，唯一 04:35 cron 保持不变，旧 06:30 不存在，四把锁均空闲或不存在，无 CFIP 残留进程；一个 Xray 进程和 `1070/1041/11400/15353` 四监听正常，Google/YouTube 均返回 HTTP 204，Cloudflare 只读 GET 返回 HTTP 200 且响应结构有效。
+- `sidecar-auto-sync.latest.tsv` 仍是 2026-08-16 的旧自然结果；这是部署后尚未到下一次 04:35 自然同步的预期状态，不手工补跑。
+
+### 收口判断
+
+- 本轮发现的确定性代码缺陷已修复，并通过真实 Linux 与生产 BusyBox 兼容路径验证。
+- 2026-08-21 的自然 Sidecar 与 04:35 自动同步仍是最后的跨主机时序验收：应消费当天新导出、刷新同步报告，并继续遵守单记录写入和全部既有门控。
+- 在该自然周期通过前，只能认定代码修复与即时生产健康验收完成，不能提前宣称整个项目已完成长期稳定性收口。
