@@ -43,6 +43,15 @@ log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 need_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 
+main_project_lock_busy() {
+  local lock="${1:-/tmp/cf-dns-speedup.lock}"
+  [ -e "$lock" ] || return 1
+  [ -d "$lock" ] && return 0
+  [ -f "$lock" ] || return 0
+  flock -n "$lock" -c true >/dev/null 2>&1 && return 1
+  return 0
+}
+
 decimal_at_least() {
   awk -v value="$1" -v minimum="$2" 'BEGIN {exit (value + 0) >= (minimum + 0) ? 0 : 1}'
 }
@@ -640,7 +649,7 @@ run_sync() {
   mkdir -p "$APP_DIR"
   exec 9>"$LOCK_FILE"
   flock -n 9 || die "another sidecar auto sync is running"
-  [ ! -e /tmp/cf-dns-speedup.lock ] || die "main CFIP project lock is present"
+  main_project_lock_busy && die "main CFIP project lock is busy"
 
   baseline_pids="$(snapshot_xray_pids)"
   baseline_listeners="$(snapshot_xray_listeners)"

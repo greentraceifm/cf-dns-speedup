@@ -133,8 +133,17 @@ assert_pids_alive() {
   done < "$1"
 }
 
+main_project_lock_busy() {
+  local lock="${1:-/tmp/cf-dns-speedup.lock}"
+  [ -e "$lock" ] || return 1
+  [ -d "$lock" ] && return 0
+  [ -f "$lock" ] || return 0
+  flock -n "$lock" -c true >/dev/null 2>&1 && return 1
+  return 0
+}
+
 assert_no_project_lock() {
-  [ ! -e /tmp/cf-dns-speedup.lock ] || die "main CFIP project lock is present; canary stopped before start"
+  main_project_lock_busy && die "main CFIP project lock is busy; canary stopped before start"
 }
 
 assert_no_canary_residue() {
