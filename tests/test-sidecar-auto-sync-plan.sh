@@ -46,11 +46,21 @@ awk -F '\t' 'NR==1 && $1=="auto3.example.test" && $2=="104.17.1.10" && $3=="104.
 
 head -n 1 "$QUALIFIED" >"$TEST_TMP/one-qualified.tsv"
 build_competition_targets "$CURRENT" "$TEST_TMP/one-qualified.tsv" "$TARGETS"
-awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.1.10"{a=1} $1=="auto4.example.test" && $2=="104.17.153.15" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS"
+awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.1.10"{a=1} $1=="auto4.example.test" && $2=="104.17.137.93" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS"
 
 : >"$TEST_TMP/no-qualified.tsv"
 build_competition_targets "$CURRENT" "$TEST_TMP/no-qualified.tsv" "$TARGETS"
 awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.137.93" && $5=="stable_mirror"{a=1} $1=="auto4.example.test" && $2=="104.17.153.15" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS"
+
+MIRROR_DUP_CURRENT="$TEST_TMP/mirror-duplicate-current.tsv"
+printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.153.15\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.153.15\nauto4.example.test\t104.17.153.15\n' >"$MIRROR_DUP_CURRENT"
+build_competition_targets "$MIRROR_DUP_CURRENT" "$TEST_TMP/no-qualified.tsv" "$TARGETS"
+awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.153.15" && $5=="stable_mirror"{a=1} $1=="auto4.example.test" && $2=="104.17.134.190" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS" \
+  || { echo "stable mirror selection did not avoid duplicate primary IPs" >&2; exit 1; }
+
+if primary_records_have_duplicates "$MIRROR_DUP_CURRENT"; then :; else
+  echo "duplicate primary detector missed duplicate records" >&2; exit 1
+fi
 
 PRIMARY_QUALIFIED="$TEST_TMP/primary-qualified.tsv"
 printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.137.93\t3\t3\t4.00\t4.10\t2026-07-29 04:20:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.153.15\t3\t3\t4.60\t4.70\t2026-07-29 04:21:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t3\t3\t4.20\t4.30\t2026-07-29 04:22:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$PRIMARY_QUALIFIED"
@@ -97,6 +107,16 @@ build_primary_targets "$DUPLICATE_CURRENT" "$DUPLICATE_PRIMARY" "$DUPLICATE_COMP
 [ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "duplicate primary repair was not accepted" >&2; exit 1; }
 awk -F '\t' '$1=="auto.example.test" && $2=="104.17.153.15"{a=1} $1=="auto1.example.test" && $2=="104.17.135.183" && $5=="duplicate_repair"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
   || { echo "duplicate primary repair target is wrong" >&2; exit 1; }
+
+DUPLICATE_PRIMARY_CURRENT="$TEST_TMP/duplicate-primary-current.tsv"
+printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.153.15\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.129.81\nauto4.example.test\t104.17.153.15\n' >"$DUPLICATE_PRIMARY_CURRENT"
+DUPLICATE_PRIMARY_QUALIFIED="$TEST_TMP/duplicate-primary-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.153.15\t6\t6\t4.26\t4.36\t2026-08-23 04:35:54\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t6\t6\t4.14\t4.35\t2026-08-23 04:36:05\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$DUPLICATE_PRIMARY_QUALIFIED"
+DUPLICATE_PRIMARY_COMPETITION="$TEST_TMP/duplicate-primary-competition.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.129.81\t3\t3\t4.27\t4.37\t2026-08-23 04:35:20\tcompetition_qualified\trouter_isolated_xray\n' >"$DUPLICATE_PRIMARY_COMPETITION"
+build_primary_targets "$DUPLICATE_PRIMARY_CURRENT" "$DUPLICATE_PRIMARY_QUALIFIED" "$DUPLICATE_PRIMARY_COMPETITION" "$PRIMARY_TARGETS"
+awk -F '\t' '$1=="auto.example.test" && $2=="104.17.153.15"{a=1} $1=="auto1.example.test" && $2=="104.17.129.81"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
+  || { echo "duplicate primary repair did not produce three distinct targets" >&2; exit 1; }
 
 GATE_SCRIPT="$ROOT/router-candidate-gate.sh"
 WATCHLIST_FILE="$APP_DIR/router-candidate-watchlist.tsv"

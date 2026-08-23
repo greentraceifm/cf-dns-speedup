@@ -442,10 +442,26 @@ record_content() {
   awk -F '\t' -v name="$name" '$1 == name {print $2; exit}' "$records_file"
 }
 
+primary_records_have_duplicates() {
+  local current_records="$1"
+  local -a primary_names=()
+  local name ip seen=""
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  for name in "${primary_names[@]}"; do
+    ip="$(record_content "$current_records" "$name")"
+    [ -n "$ip" ] || return 1
+    case " $seen " in
+      *" $ip "*) return 0 ;;
+      *) seen="$seen $ip" ;;
+    esac
+  done
+  return 1
+}
+
 build_competition_targets() {
   local current_records="$1" qualified="$2" output="$3"
-  local -a competition_names=() primary_names=() challengers=() mins=() avgs=()
-  local name ip days minimum average primary_ip desired source index
+  local -a competition_names=() primary_names=() challengers=() mins=() avgs=() mirrors=()
+  local name ip days minimum average desired source index mirror mirror_used=""
   read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
   read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
   [ "${#competition_names[@]}" -eq 2 ] || die "exactly two competition records are required"
@@ -469,10 +485,22 @@ build_competition_targets() {
     name="${competition_names[$index]}"
     if [ "$index" -lt "${#challengers[@]}" ]; then
       desired="${challengers[$index]}"; minimum="${mins[$index]}"; average="${avgs[$index]}"; source=challenger
-    elif [ "$index" -eq 0 ]; then
-      desired="$primary1"; minimum=""; average=""; source=stable_mirror
     else
-      desired="$primary2"; minimum=""; average=""; source=stable_mirror
+      desired=""
+      for mirror in "$primary1" "$primary2" "$primary3"; do
+        case " $mirror_used " in
+          *" $mirror "*) continue ;;
+        esac
+        desired="$mirror"
+        mirror_used="$mirror_used $mirror"
+        break
+      done
+      if [ -n "$desired" ]; then
+        minimum=""; average=""; source=stable_mirror
+      else
+        desired="$(record_content "$current_records" "$name")"
+        minimum=""; average=""; source=stable_mirror_unavailable
+      fi
     fi
     printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$desired" "$minimum" "$average" "$source" >>"$output"
   done
@@ -697,16 +725,19 @@ run_sync() {
   run_primary_canaries "$current_records"
   "$GATE_SCRIPT" primary-qualify >/dev/null
 
-  build_competition_targets "$current_records" "$qualified_file" "$competition_targets"
-  choose_pending_target "$current_records" "$competition_targets" "$pending"
-  if [ -s "$pending" ]; then
-    target_kind=competition
-  else
-    build_primary_targets "$current_records" "$PRIMARY_QUALIFIED_FILE" "$QUALIFIED_FILE" "$primary_targets"
-    if [ "$PRIMARY_BASELINE_READY" -eq 1 ]; then
-      choose_pending_target "$current_records" "$primary_targets" "$pending"
-      [ ! -s "$pending" ] || target_kind=primary
-    fi
+  build_primary_targets "$current_records" "$PRIMARY_QUALIFIED_FILE" "$QUALIFIED_FILE" "$primary_targets"
+  if [ "$PRIMARY_BASELINE_READY" -eq 1 ] && primary_records_have_duplicates "$current_records"; then
+    choose_pending_target "$current_records" "$primary_targets" "$pending"
+    [ ! -s "$pending" ] || target_kind=primary
+  fi
+  if [ ! -s "$pending" ]; then
+    build_competition_targets "$current_records" "$qualified_file" "$competition_targets"
+    choose_pending_target "$current_records" "$competition_targets" "$pending"
+    [ ! -s "$pending" ] || target_kind=competition
+  fi
+  if [ ! -s "$pending" ] && [ "$PRIMARY_BASELINE_READY" -eq 1 ]; then
+    choose_pending_target "$current_records" "$primary_targets" "$pending"
+    [ ! -s "$pending" ] || target_kind=primary
   fi
 
   if [ ! -s "$pending" ]; then
