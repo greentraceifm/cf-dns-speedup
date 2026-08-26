@@ -2,6 +2,10 @@
 set -Eeuo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 || ! "$PYTHON_BIN" -c 'import sys; sys.exit(0)' >/dev/null 2>&1; then
+  PYTHON_BIN=python
+fi
 TMP_DIR="$(mktemp -d)"
 export SIDECAR_CONFIG_FILE="$TMP_DIR/missing.env"
 export SIDECAR_RUN_DIR="$TMP_DIR/run"
@@ -56,16 +60,28 @@ fi
 maintenance_lock="$TMP_DIR/maintenance.lock"
 printf '\n' >"$maintenance_lock"
 SIDECAR_HOST_MAINTENANCE_LOCKS="$maintenance_lock"
-exec 8>"$maintenance_lock"
-flock -n 8
-if (assert_host_maintenance_idle); then
-  echo "held host maintenance lock was accepted" >&2
-  exit 1
+if command -v flock >/dev/null 2>&1; then
+  exec 8>"$maintenance_lock"
+  flock -n 8
+  if (assert_host_maintenance_idle); then
+    echo "held host maintenance lock was accepted" >&2
+    exit 1
+  fi
+  flock -u 8
+  exec 8>&-
+  assert_host_maintenance_idle || { echo "free host maintenance lock was rejected" >&2; exit 1; }
+  SIDECAR_HOST_MAINTENANCE_LOCKS="$TMP_DIR/absent.lock"
+  assert_host_maintenance_idle || { echo "absent host maintenance lock was rejected" >&2; exit 1; }
+else
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "host maintenance lock runtime test skipped: flock is unavailable in Windows Git Bash"
+      ;;
+    *)
+      echo "flock is required for native lock validation" >&2
+      exit 1
+      ;;
+  esac
 fi
-flock -u 8
-exec 8>&-
-assert_host_maintenance_idle || { echo "free host maintenance lock was rejected" >&2; exit 1; }
-SIDECAR_HOST_MAINTENANCE_LOCKS="$TMP_DIR/absent.lock"
-assert_host_maintenance_idle || { echo "absent host maintenance lock was rejected" >&2; exit 1; }
 
 echo "resource contract test passed"
