@@ -31,7 +31,8 @@
 - `.140:22` 已恢复，已通过既有严格主机密钥和 OpenClaw 受保护维护通道完成 `.110/.254` 只读审计。
 - `.110` Sidecar 成功退出、timer active/enabled、报告和导出有效、无残留 Xray/容器、三个必要容器 healthy、Ollama 无驻留模型。
 - `.110` 首轮 Google/YouTube 曾短暂超时，随后重复只读检查恢复 HTTP 204；未据此修改 DNS。
-- OpenClaw 记忆和 Notion 尚待本轮记录同步完成后确认。
+- OpenClaw 记忆已写入：`/home/ubuntu/.openclaw/workspace/memory/2026-08-26-openwrt-cfip-primary-slot-swap-repair.md`，写入后 SHA256 为 `90a3f01d...7c6c041`。
+- Notion 项目页本轮探测通过 `.140` SSH 超时，未写入；保留为待同步事项，不使用未授权的直接 Token 路径。
 - Windows Git Bash 没有原生 Linux `flock`，锁竞争运行时测试仍需在 Linux/VM/CI 中执行。
 
 ## 后续最小优化建议
