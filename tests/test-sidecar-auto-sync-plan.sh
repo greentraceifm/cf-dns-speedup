@@ -118,6 +118,19 @@ build_primary_targets "$DUPLICATE_PRIMARY_CURRENT" "$DUPLICATE_PRIMARY_QUALIFIED
 awk -F '\t' '$1=="auto.example.test" && $2=="104.17.153.15"{a=1} $1=="auto1.example.test" && $2=="104.17.129.81"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
   || { echo "duplicate primary repair did not produce three distinct targets" >&2; exit 1; }
 
+UNSAFE_SWAP_CURRENT="$TEST_TMP/unsafe-primary-swap-current.tsv"
+printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.130.125\nauto4.example.test\t104.17.153.186\n' >"$UNSAFE_SWAP_CURRENT"
+UNSAFE_SWAP_PRIMARY="$TEST_TMP/unsafe-primary-swap-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.153.15\t6\t6\t4.26\t4.40\t2026-08-26 04:35:53\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t6\t6\t4.13\t4.38\t2026-08-26 04:36:16\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$UNSAFE_SWAP_PRIMARY"
+UNSAFE_SWAP_COMPETITION="$TEST_TMP/unsafe-primary-swap-competition.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.129.81\t4\t4\t4.27\t4.36\t2026-08-24 04:35:22\tcompetition_qualified\trouter_isolated_xray\n104.17.130.125\t6\t6\t4.25\t4.35\t2026-08-26 04:35:19\tcompetition_qualified\trouter_isolated_xray\n' >"$UNSAFE_SWAP_COMPETITION"
+build_primary_targets "$UNSAFE_SWAP_CURRENT" "$UNSAFE_SWAP_PRIMARY" "$UNSAFE_SWAP_COMPETITION" "$PRIMARY_TARGETS"
+choose_pending_primary_target "$UNSAFE_SWAP_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
+if awk -F '\t' '$2 == "104.17.129.81" {found=1} END {exit found ? 0 : 1}' "$PENDING"; then
+  echo "primary planning allowed a one-record swap that creates a duplicate" >&2
+  exit 1
+fi
+
 GATE_SCRIPT="$ROOT/router-candidate-gate.sh"
 WATCHLIST_FILE="$APP_DIR/router-candidate-watchlist.tsv"
 CANARY_HISTORY_FILE="$APP_DIR/router-candidate-canary-history.tsv"

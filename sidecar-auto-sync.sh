@@ -644,6 +644,30 @@ choose_pending_target() {
     fi
   done <"$targets"
 }
+choose_pending_primary_target() {
+  local current_records="$1" targets="$2" output="$3"
+  local name desired minimum average source current other_name other_current
+  local -a primary_names=()
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  : >"$output"
+  while IFS=$'\t' read -r name desired minimum average source; do
+    current="$(record_content "$current_records" "$name")"
+    [ -n "$current" ] || die "cannot determine current primary target record content"
+    [ "$current" != "$desired" ] || continue
+    # A one-record update cannot safely swap two primary slots. Reject a
+    # desired IP that is currently held by another primary record, otherwise
+    # the update would create a duplicate exposed primary slot.
+    for other_name in "${primary_names[@]}"; do
+      [ "$other_name" = "$name" ] && continue
+      other_current="$(record_content "$current_records" "$other_name")"
+      [ -n "$other_current" ] || die "cannot determine current primary record content"
+      [ "$other_current" = "$desired" ] && continue 2
+    done
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$name" "$desired" "$current" "$minimum" "$average" "$source" >"$output"
+    return 0
+  done <"$targets"
+}
 validate_target_records() {
   local configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}" target found
   local -a competition=() primary=()
@@ -727,7 +751,7 @@ run_sync() {
 
   build_primary_targets "$current_records" "$PRIMARY_QUALIFIED_FILE" "$QUALIFIED_FILE" "$primary_targets"
   if [ "$PRIMARY_BASELINE_READY" -eq 1 ] && primary_records_have_duplicates "$current_records"; then
-    choose_pending_target "$current_records" "$primary_targets" "$pending"
+    choose_pending_primary_target "$current_records" "$primary_targets" "$pending"
     [ ! -s "$pending" ] || target_kind=primary
   fi
   if [ ! -s "$pending" ]; then
@@ -736,7 +760,7 @@ run_sync() {
     [ ! -s "$pending" ] || target_kind=competition
   fi
   if [ ! -s "$pending" ] && [ "$PRIMARY_BASELINE_READY" -eq 1 ]; then
-    choose_pending_target "$current_records" "$primary_targets" "$pending"
+    choose_pending_primary_target "$current_records" "$primary_targets" "$pending"
     [ ! -s "$pending" ] || target_kind=primary
   fi
 
