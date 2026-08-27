@@ -510,7 +510,7 @@ PRIMARY_BASELINE_READY=0
 
 build_primary_targets() {
   local current_records="$1" primary_qualified="$2" competition_qualified="$3" output="$4"
-  local pool="$output.pool.$$" ranked="$output.ranked.$$" rc=0 index=0 name
+  local pool="$output.pool.$$" ranked="$output.ranked.$$" rc=0 index=0 name pool_rows
   local -a primary_names=() winners=() mins=() avgs=() sources=()
   read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
   [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
@@ -565,6 +565,15 @@ build_primary_targets() {
           pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="challenger"
         }
       }
+      if (duplicate_primary) {
+        # Duplicate repair may need a qualified competition candidate that is
+        # no longer exposed in auto3/auto4; otherwise the repair pool can be
+        # smaller than three even though a safe replacement is available.
+        for (ip in c_min) {
+          if ((ip in current_primary) || c_min[ip] < primary_min || c_min[ip] <= weak_min) continue
+          pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="duplicate_repair"
+        }
+      }
       for (ip in pool)
         printf "%s\t%d\t%.2f\t%.2f\t%s\n", ip, days[ip], minimum[ip], average[ip], source[ip]
     }
@@ -576,8 +585,9 @@ build_primary_targets() {
     *) rm -f "$pool" "$ranked"; die "cannot build primary ranking pool" ;;
   esac
 
-  rank_candidate_rows 3 <"$pool" >"$ranked"
-  [ "$(awk 'END {print NR + 0}' "$ranked")" -eq 3 ] \
+  pool_rows="$(awk 'END {print NR + 0}' "$pool")"
+  rank_candidate_rows "$pool_rows" <"$pool" >"$ranked"
+  [ "$(awk 'END {print NR + 0}' "$ranked")" -ge 3 ] \
     || { rm -f "$pool" "$ranked"; return 0; }
   while IFS=$'\t' read -r candidate days minimum average source; do
     winners+=("$candidate"); mins+=("$minimum"); avgs+=("$average"); sources+=("$source")
@@ -592,9 +602,38 @@ build_primary_targets() {
   done
   if [ "$duplicate_primary" -eq 1 ]; then
     local assigned="" selected_candidate selected_days selected_min selected_avg selected_source
+    local row primary_name other_primary same_count
     : >"$output"
+
+    # Preserve every currently unique, still-qualified primary first. This
+    # prevents a duplicate repair from stealing a healthy slot merely because
+    # that slot appears later in the configured record order.
+    for primary_name in "${primary_names[@]}"; do
+      current_candidate="$(record_content "$current_records" "$primary_name")"
+      same_count=0
+      for other_primary in "${primary_names[@]}"; do
+        other_current="$(record_content "$current_records" "$other_primary")"
+        [ "$other_current" = "$current_candidate" ] && same_count=$((same_count + 1))
+      done
+      [ "$same_count" -eq 1 ] || continue
+      row="$(awk -F '\t' -v ip="$current_candidate" '$1 == ip {print; exit}' "$ranked")"
+      [ -n "$row" ] || { rm -f "$pool" "$ranked"; return 0; }
+      IFS=$'\t' read -r selected_candidate selected_days selected_min selected_avg selected_source <<<"$row"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$primary_name" "$selected_candidate" "$selected_min" \
+        "$selected_avg" "$selected_source" >>"$output"
+      assigned="$assigned $selected_candidate"
+    done
+
+    # Keep the first occurrence of each duplicated current IP, then replace
+    # only later duplicates with the best unassigned qualified candidate.
     for name in "${primary_names[@]}"; do
       current_candidate="$(record_content "$current_records" "$name")"
+      same_count=0
+      for other_primary in "${primary_names[@]}"; do
+        other_current="$(record_content "$current_records" "$other_primary")"
+        [ "$other_current" = "$current_candidate" ] && same_count=$((same_count + 1))
+      done
+      [ "$same_count" -gt 1 ] || continue
       case " $assigned " in
         *" $current_candidate "*)
           selected_candidate=""; selected_days=""; selected_min=""; selected_avg=""; selected_source=""
@@ -603,6 +642,13 @@ build_primary_targets() {
             selected_candidate="$candidate"; selected_days="$days"; selected_min="$minimum"
             selected_avg="$average"; selected_source="$source"; break
           done <"$ranked"
+          if [ -z "$selected_candidate" ]; then
+            while IFS=$'\t' read -r candidate days minimum average source; do
+              case " $assigned " in *" $candidate "*) continue ;; esac
+              selected_candidate="$candidate"; selected_days="$days"; selected_min="$minimum"
+              selected_avg="$average"; selected_source="$source"; break
+            done <"$ranked"
+          fi
           [ -n "$selected_candidate" ] || { rm -f "$pool" "$ranked"; return 0; }
           printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$selected_candidate" "$selected_min" \
             "$selected_avg" "$selected_source" >>"$output"
@@ -610,7 +656,10 @@ build_primary_targets() {
           ;;
         *)
           row="$(awk -F '\t' -v ip="$current_candidate" '$1 == ip {print; exit}' "$ranked")"
-          [ -n "$row" ] || { rm -f "$pool" "$ranked"; return 0; }
+          if [ -z "$row" ]; then
+            rm -f "$pool" "$ranked"
+            return 0
+          fi
           IFS=$'\t' read -r selected_candidate selected_days selected_min selected_avg selected_source <<<"$row"
           printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$selected_candidate" "$selected_min" \
             "$selected_avg" "$selected_source" >>"$output"

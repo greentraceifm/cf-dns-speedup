@@ -118,6 +118,16 @@ build_primary_targets "$DUPLICATE_PRIMARY_CURRENT" "$DUPLICATE_PRIMARY_QUALIFIED
 awk -F '\t' '$1=="auto.example.test" && $2=="104.17.153.15"{a=1} $1=="auto1.example.test" && $2=="104.17.129.81"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
   || { echo "duplicate primary repair did not produce three distinct targets" >&2; exit 1; }
 
+UNUSED_REPAIR_CURRENT="$TEST_TMP/unused-repair-current.tsv"
+printf 'auto.example.test\t104.17.129.81\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.158.61\nauto4.example.test\t104.17.153.15\n' >"$UNUSED_REPAIR_CURRENT"
+UNUSED_REPAIR_PRIMARY="$TEST_TMP/unused-repair-primary.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.129.81\t3\t3\t4.29\t4.33\t2026-08-27 04:36:02\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t7\t7\t4.13\t4.36\t2026-08-27 04:36:13\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.153.15\t6\t6\t4.26\t4.40\t2026-08-26 04:35:53\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$UNUSED_REPAIR_PRIMARY"
+UNUSED_REPAIR_COMPETITION="$TEST_TMP/unused-repair-competition.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.130.125\t7\t7\t4.14\t4.33\t2026-08-27 04:35:27\tcompetition_qualified\trouter_isolated_xray\n104.17.129.81\t4\t4\t4.27\t4.36\t2026-08-24 04:35:22\tcompetition_qualified\trouter_isolated_xray\n104.17.158.61\t3\t3\t4.23\t4.32\t2026-08-27 04:35:39\tcompetition_qualified\trouter_isolated_xray\n' >"$UNUSED_REPAIR_COMPETITION"
+build_primary_targets "$UNUSED_REPAIR_CURRENT" "$UNUSED_REPAIR_PRIMARY" "$UNUSED_REPAIR_COMPETITION" "$PRIMARY_TARGETS"
+awk -F '\t' '$1=="auto.example.test" && $2!=""{a=$2} $1=="auto1.example.test" && $2!=""{b=$2} $1=="auto2.example.test" && $2!=""{c=$2} END{exit(a!="" && b!="" && c!="" && a!=b && a!=c && b!=c)?0:1}' "$PRIMARY_TARGETS" \
+  || { echo "duplicate repair did not produce three distinct primary targets" >&2; exit 1; }
+
 UNSAFE_SWAP_CURRENT="$TEST_TMP/unsafe-primary-swap-current.tsv"
 printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.130.125\nauto4.example.test\t104.17.153.186\n' >"$UNSAFE_SWAP_CURRENT"
 UNSAFE_SWAP_PRIMARY="$TEST_TMP/unsafe-primary-swap-qualified.tsv"
