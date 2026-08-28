@@ -330,3 +330,21 @@ CFIP 生产链路继续保持健康。本轮没有发现需要调整候选门槛
 
 - 本轮未发现新的生产代码缺陷。此前的主槽重复问题已在自然周期中得到实际修复验证，当前 `auto/auto1/auto2` 已恢复三地址冗余。
 - 不恢复旧 `06:30` 任务，不调整门槛、DNS、PassWall、候选池或 Ollama 策略。后续保持自然周期观察即可。
+
+## 2026-08-28 Sidecar 出口漂移故障复核
+
+### 现象与根因
+
+- `.110` 的 `cfip-sidecar.service` 曾在 `2026-08-27 19:33 UTC` 以 `ExecMainStatus=1` 退出，日志为宿主机与 Sidecar 公网出口不一致；这是 Sidecar 的既有安全门控主动退出，不是 Sub2API Compose 故障。
+- 当前配置 `SIDECAR_HOST_EXIT_RELATION=same` 与稳定拓扑一致。`2026-08-28` 只读探针确认宿主机和 Sidecar 均成功取得同一公网出口，因此没有证据支持修改该配置。
+- 复核同时确认 `sub2api`、`sub2api-postgres`、`sub2api-redis` 均为 running/healthy，负载约 `0.01`，可用内存约 `14.3 GiB`，Sidecar 锁空闲、无临时 Xray JSON；故障范围仅限一次出口漂移。
+
+### 修复与后检
+
+- 通过既有 `.140 -> ollama-server` 受保护维护链路执行 `systemctl reset-failed cfip-sidecar.service`，清除过期的 systemd failed 标记；没有启动或重启 Sidecar、Sub2API、Docker、PassWall、DNS 或 VM。
+- 修复后状态为 `ActiveState=inactive`、`Result=success`，timer 仍为 `active/enabled`，锁空闲且无 Xray 残留；三项实际生产容器继续 healthy。`ExecMainStatus=1` 仅保留为最近一次历史执行退出码，不代表当前服务失败。
+- 未修改 `sidecar.env`、出口关系、候选门槛、cron、Cloudflare、DNS 或任何生产路由。下一次自然 timer 会重新执行原有三次重试与出口关系门控。
+
+### 收口结论
+
+本次没有需要修改的生产代码缺陷。问题是一次性出口路径漂移加上 systemd 保留历史失败状态；当前链路已恢复为正常、可等待自然周期验证。若未来再次发生同样日志，应记录为实际出口漂移并继续保持安全退出，不应为了“保持成功”而取消出口关系检查或强行改为 `different`。
