@@ -541,14 +541,26 @@ build_primary_targets() {
       for (i=1; i<=primary_count; i++) {
         ip=records[primary_record[i]]
         if (ip == "") exit 4
-        if (ip in current_primary) duplicate_primary=1
+        current_count[ip]++
+        if (current_count[ip] > 1) duplicate_primary=1
         current_primary[ip]=1
+      }
+      for (i=1; i<=primary_count; i++) {
+        ip=records[primary_record[i]]
+        valid_current=0
         if (ip in p_min) {
           pool[ip]=1; days[ip]=p_days[ip]; minimum[ip]=p_min[ip]; average[ip]=p_avg[ip]; source[ip]="primary_history"
+          valid_current=1
         } else if ((ip in c_min) && c_min[ip] >= primary_min) {
           pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="competition_history"
+          valid_current=1
+        } else if (duplicate_primary && current_count[ip] > 1) {
+          # Keep one incumbent reference while replacing its later duplicate.
+          # A missing qualification means it is below the primary gate; every
+          # replacement still has to satisfy primary_min and is therefore safer.
+          pool[ip]=1; days[ip]=0; minimum[ip]=0; average[ip]=0; source[ip]="duplicate_incumbent"
         } else exit 3
-        if (weak_min == "" || minimum[ip] < weak_min) weak_min=minimum[ip]
+        if (valid_current && (weak_min == "" || minimum[ip] < weak_min)) weak_min=minimum[ip]
       }
       for (ip in p_min) {
         pool[ip]=1; days[ip]=p_days[ip]; minimum[ip]=p_min[ip]; average[ip]=p_avg[ip]; source[ip]="primary_history"
@@ -558,7 +570,7 @@ build_primary_targets() {
         if (ip == "" || (ip in current_primary) || !(ip in c_min)) continue
         if (c_min[ip] < primary_min) continue
         if (duplicate_primary) {
-          if (c_min[ip] <= weak_min) continue
+          if (weak_min != "" && c_min[ip] <= weak_min) continue
           pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="duplicate_repair"
         } else {
           if ((c_min[ip] * 100) + 0.0001 < weak_min * (100 + improvement)) continue
@@ -570,7 +582,7 @@ build_primary_targets() {
         # no longer exposed in auto3/auto4; otherwise the repair pool can be
         # smaller than three even though a safe replacement is available.
         for (ip in c_min) {
-          if ((ip in current_primary) || c_min[ip] < primary_min || c_min[ip] <= weak_min) continue
+          if ((ip in current_primary) || c_min[ip] < primary_min || (weak_min != "" && c_min[ip] <= weak_min)) continue
           pool[ip]=1; days[ip]=c_days[ip]; minimum[ip]=c_min[ip]; average[ip]=c_avg[ip]; source[ip]="duplicate_repair"
         }
       }

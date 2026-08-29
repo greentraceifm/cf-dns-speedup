@@ -128,6 +128,18 @@ build_primary_targets "$UNUSED_REPAIR_CURRENT" "$UNUSED_REPAIR_PRIMARY" "$UNUSED
 awk -F '\t' '$1=="auto.example.test" && $2!=""{a=$2} $1=="auto1.example.test" && $2!=""{b=$2} $1=="auto2.example.test" && $2!=""{c=$2} END{exit(a!="" && b!="" && c!="" && a!=b && a!=c && b!=c)?0:1}' "$PRIMARY_TARGETS" \
   || { echo "duplicate repair did not produce three distinct primary targets" >&2; exit 1; }
 
+FAILED_DUPLICATE_CURRENT="$TEST_TMP/failed-duplicate-current.tsv"
+printf 'auto.example.test\t104.17.129.81\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.130.125\nauto4.example.test\t104.17.153.15\n' >"$FAILED_DUPLICATE_CURRENT"
+FAILED_DUPLICATE_PRIMARY="$TEST_TMP/failed-duplicate-primary.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.134.190\t6\t6\t4.13\t4.33\t2026-08-29 04:36:09\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.153.15\t4\t4\t4.26\t4.41\t2026-08-26 04:35:53\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$FAILED_DUPLICATE_PRIMARY"
+FAILED_DUPLICATE_COMPETITION="$TEST_TMP/failed-duplicate-competition.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.130.125\t6\t6\t4.14\t4.31\t2026-08-29 04:35:22\tcompetition_qualified\trouter_isolated_xray\n104.17.158.61\t4\t4\t4.11\t4.28\t2026-08-29 04:35:34\tcompetition_qualified\trouter_isolated_xray\n' >"$FAILED_DUPLICATE_COMPETITION"
+build_primary_targets "$FAILED_DUPLICATE_CURRENT" "$FAILED_DUPLICATE_PRIMARY" "$FAILED_DUPLICATE_COMPETITION" "$PRIMARY_TARGETS"
+[ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "failed duplicate incumbent blocked safe primary repair" >&2; exit 1; }
+choose_pending_primary_target "$FAILED_DUPLICATE_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
+awk -F '\t' '$1=="auto1.example.test" && $2!="104.17.129.81" && $3=="104.17.129.81" && ($6=="primary_history" || $6=="duplicate_repair"){ok=1} END{exit ok?0:1}' "$PENDING" \
+  || { echo "failed duplicate incumbent did not select a qualified distinct replacement" >&2; exit 1; }
+
 UNSAFE_SWAP_CURRENT="$TEST_TMP/unsafe-primary-swap-current.tsv"
 printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.130.125\nauto4.example.test\t104.17.153.186\n' >"$UNSAFE_SWAP_CURRENT"
 UNSAFE_SWAP_PRIMARY="$TEST_TMP/unsafe-primary-swap-qualified.tsv"
