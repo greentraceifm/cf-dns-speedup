@@ -36,7 +36,8 @@ exit 0
 EOF
 chmod +x "$BIN"/*
 printf 'config passwall\n' > "$TMP_DIR/passwall"
-printf '{"outbounds":[{"protocol":"vmess","tag":"proxy","settings":{"address":"104.17.1.10"}}]}\n' > "$TMP_DIR/runtime.json"
+mkdir -p "$TMP_DIR/etc/passwall/acl/default"
+printf '{"outbounds":[{"protocol":"vmess","tag":"proxy","settings":{"address":"104.17.1.10"}}]}\n' > "$TMP_DIR/etc/passwall/acl/default/global.json"
 NOW="$(date +%s)"
 OBSERVED_AT="$(date '+%F %T')"
 HEADER=$'schema_version\texported_epoch\tobserved_at\tcandidate_ip\tdirect_MBps\tround1_MBps\tround2_MBps\tmin_MBps\tavg_MBps\thttp1\thttp2\tstatus\tpath_mode'
@@ -54,7 +55,8 @@ export CONFIG_FILE="$TMP_DIR/missing.env"
 export CFIP_CANDIDATE_GATE_LOCK="$TMP_DIR/gate.lock"
 export CFST_PASSWALL_NODE_OBSERVE_LOCK="$TMP_DIR/observe.lock"
 export CFIP_ROUTER_CANARY_XRAY_BIN="$BIN/fake-xray"
-export CFIP_ROUTER_CANARY_RUNTIME_JSON="$TMP_DIR/runtime.json"
+unset CFIP_ROUTER_CANARY_RUNTIME_JSON
+export CFIP_ROUTER_CANARY_RUNTIME_JSON_FALLBACK="$TMP_DIR/etc/passwall/acl/default/global.json"
 export CFIP_ROUTER_CANARY_PASSWALL_CONFIG="$TMP_DIR/passwall"
 export CFIP_ROUTER_CANARY_PORT=19080
 

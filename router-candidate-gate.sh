@@ -20,6 +20,7 @@ MAX_FILE_BYTES="65536"
 MAX_CANDIDATES="5"
 XRAY_BIN="${CFIP_ROUTER_CANARY_XRAY_BIN:-/usr/bin/xray}"
 RUNTIME_JSON="${CFIP_ROUTER_CANARY_RUNTIME_JSON:-/tmp/etc/passwall/acl/default/TCP_UDP_SOCKS.json}"
+RUNTIME_JSON_FALLBACK="${CFIP_ROUTER_CANARY_RUNTIME_JSON_FALLBACK:-/tmp/etc/passwall/acl/default/global.json}"
 PASSWALL_CONFIG_FILE="${CFIP_ROUTER_CANARY_PASSWALL_CONFIG:-/etc/config/passwall}"
 CANARY_PORT="${CFIP_ROUTER_CANARY_PORT:-19080}"
 CANARY_URL="${CFIP_ROUTER_CANARY_TEST_URL:-https://greentrace-speedtest.pages.dev/20mb.bin}"
@@ -159,6 +160,12 @@ assert_no_canary_residue() {
 }
 
 assert_runtime_json() {
+  if [ -z "${CFIP_ROUTER_CANARY_RUNTIME_JSON:-}" ] \
+    && [ ! -e "$RUNTIME_JSON" ] \
+    && [ -f "$RUNTIME_JSON_FALLBACK" ]; then
+    RUNTIME_JSON="$RUNTIME_JSON_FALLBACK"
+    log "using PassWall runtime JSON fallback: global.json"
+  fi
   [ -f "$RUNTIME_JSON" ] && [ ! -L "$RUNTIME_JSON" ] || die "PassWall runtime JSON is missing or symlinked"
   [ "$(wc -c < "$RUNTIME_JSON" | tr -d ' ')" -le 131072 ] || die "runtime JSON is unexpectedly large"
   jq -e '([.outbounds[] | select(.protocol == "vmess" and (.settings.address | type == "string"))] | length) == 1' \
