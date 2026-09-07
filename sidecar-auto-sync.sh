@@ -507,6 +507,7 @@ build_competition_targets() {
 }
 
 PRIMARY_BASELINE_READY=0
+COMPETITION_TRANSITION_STATE=none
 
 build_primary_targets() {
   local current_records="$1" primary_qualified="$2" competition_qualified="$3" output="$4"
@@ -693,17 +694,65 @@ build_primary_targets() {
 }
 choose_pending_target() {
   local current_records="$1" targets="$2" output="$3"
-  local name desired minimum average source current
+  local name desired minimum average source current index other mismatch=0 same_set=1
+  local desired_count current_count conflict
+  local -a names=() desireds=() minimums=() averages=() sources=() currents=()
+  COMPETITION_TRANSITION_STATE=none
   : >"$output"
   while IFS=$'\t' read -r name desired minimum average source; do
     current="$(record_content "$current_records" "$name")"
     [ -n "$current" ] || die "cannot determine current target record content"
-    if [ "$current" != "$desired" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$name" "$desired" "$current" "$minimum" "$average" "$source" >"$output"
-      return 0
-    fi
+    names+=("$name"); desireds+=("$desired"); minimums+=("$minimum")
+    averages+=("$average"); sources+=("$source"); currents+=("$current")
+    [ "$current" = "$desired" ] || mismatch=1
   done <"$targets"
+  [ "$mismatch" -eq 1 ] || return 0
+
+  # Keep the existing permutation when only slot order changed. A ranking
+  # label is not worth temporarily exposing the same IP in both slots.
+  for desired in "${desireds[@]}"; do
+    desired_count=0; current_count=0
+    for other in "${desireds[@]}"; do
+      [ "$other" = "$desired" ] && desired_count=$((desired_count + 1))
+    done
+    for other in "${currents[@]}"; do
+      [ "$other" = "$desired" ] && current_count=$((current_count + 1))
+    done
+    [ "$desired_count" -eq "$current_count" ] || { same_set=0; break; }
+  done
+  if [ "$same_set" -eq 1 ]; then
+    COMPETITION_TRANSITION_STATE=order_only
+    return 0
+  fi
+
+  for index in "${!names[@]}"; do
+    [ "${currents[$index]}" != "${desireds[$index]}" ] || continue
+    conflict=0
+    for other in "${!names[@]}"; do
+      [ "$other" = "$index" ] && continue
+      [ "${currents[$other]}" = "${desireds[$index]}" ] && { conflict=1; break; }
+    done
+    [ "$conflict" -eq 0 ] || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${names[$index]}" "${desireds[$index]}" "${currents[$index]}" \
+      "${minimums[$index]}" "${averages[$index]}" "${sources[$index]}" >"$output"
+    COMPETITION_TRANSITION_STATE=ready
+    return 0
+  done
+  COMPETITION_TRANSITION_STATE=blocked
+}
+
+assert_competition_update_safe() {
+  local current_records="$1" target="$2" candidate="$3" name current
+  local -a competition_names=()
+  read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
+  for name in "${competition_names[@]}"; do
+    [ "$name" = "$target" ] && continue
+    current="$(record_content "$current_records" "$name")"
+    [ -n "$current" ] || die "cannot determine current competition record content"
+    [ "$current" != "$candidate" ] \
+      || die "competition update would create a duplicate exposed slot"
+  done
 }
 choose_pending_primary_target() {
   local current_records="$1" targets="$2" output="$3"
@@ -835,6 +884,13 @@ run_sync() {
     elif [ ! -s "$qualified_file" ]; then
       write_report awaiting_multiday_gate "" "" "" candidate_not_yet_qualified_for_competition
       log "observation candidates have not completed the consecutive three-day router gate"
+    elif [ "$COMPETITION_TRANSITION_STATE" = blocked ]; then
+      write_report awaiting_safe_competition_transition "" "" "" no_safe_single_record_competition_update
+      log "competition target change has no safe single-record transition"
+    elif [ "$COMPETITION_TRANSITION_STATE" = order_only ]; then
+      candidate="$(awk -F '\t' 'NR == 1 {print $1}' "$qualified_file")"
+      write_report already_present "$candidate" "" "" competition_slots_already_contain_ranked_target_set
+      log "competition slots already contain the ranked target set; ordering-only swap skipped"
     else
       candidate="$(awk -F '\t' 'NR == 1 {print $1}' "$qualified_file")"
       write_report already_present "$candidate" "" "" competition_and_primary_slots_already_match_ranked_targets
@@ -847,6 +903,9 @@ run_sync() {
   if [ "$target_kind" = competition ] && [ "$target_source" = challenger ]; then
     decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_MIN_MBPS" \
       || die "qualified challenger is below automatic sync threshold"
+  fi
+  if [ "$target_kind" = competition ]; then
+    assert_competition_update_safe "$current_records" "$target" "$candidate"
   fi
   if [ "$target_kind" = primary ]; then
     decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" \

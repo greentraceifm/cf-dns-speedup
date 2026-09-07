@@ -44,6 +44,28 @@ if grep -Eq '^auto(1|2)?\.example\.test\t' "$TARGETS"; then echo "primary record
 choose_pending_target "$CURRENT" "$TARGETS" "$PENDING"
 awk -F '\t' 'NR==1 && $1=="auto3.example.test" && $2=="104.17.1.10" && $3=="104.17.137.93"{ok=1} END{exit ok?0:1}' "$PENDING"
 
+SWAP_CURRENT="$TEST_TMP/competition-swap-current.tsv"
+SWAP_TARGETS="$TEST_TMP/competition-swap-targets.tsv"
+printf 'auto3.example.test\t104.17.1.10\nauto4.example.test\t104.17.1.11\n' >"$SWAP_CURRENT"
+printf 'auto3.example.test\t104.17.1.11\t4.20\t4.40\tchallenger\nauto4.example.test\t104.17.1.10\t4.60\t4.70\tchallenger\n' >"$SWAP_TARGETS"
+choose_pending_target "$SWAP_CURRENT" "$SWAP_TARGETS" "$PENDING"
+[ ! -s "$PENDING" ] && [ "$COMPETITION_TRANSITION_STATE" = order_only ] \
+  || { echo "competition ordering-only swap was not suppressed" >&2; exit 1; }
+
+PARTIAL_TARGETS="$TEST_TMP/competition-partial-targets.tsv"
+printf 'auto3.example.test\t104.17.1.11\t4.20\t4.40\tchallenger\nauto4.example.test\t104.17.1.12\t4.10\t4.30\tchallenger\n' >"$PARTIAL_TARGETS"
+choose_pending_target "$SWAP_CURRENT" "$PARTIAL_TARGETS" "$PENDING"
+awk -F '\t' 'NR==1 && $1=="auto4.example.test" && $2=="104.17.1.12" && $3=="104.17.1.11"{ok=1} END{exit ok?0:1}' "$PENDING" \
+  || { echo "competition transition did not choose the safe non-duplicating update" >&2; exit 1; }
+[ "$COMPETITION_TRANSITION_STATE" = ready ] \
+  || { echo "safe competition transition state was not reported" >&2; exit 1; }
+
+DUPLICATE_COMPETITION_CURRENT="$TEST_TMP/competition-duplicate-current.tsv"
+printf 'auto3.example.test\t104.17.1.11\nauto4.example.test\t104.17.1.11\n' >"$DUPLICATE_COMPETITION_CURRENT"
+choose_pending_target "$DUPLICATE_COMPETITION_CURRENT" "$SWAP_TARGETS" "$PENDING"
+awk -F '\t' 'NR==1 && $1=="auto4.example.test" && $2=="104.17.1.10" && $3=="104.17.1.11"{ok=1} END{exit ok?0:1}' "$PENDING" \
+  || { echo "existing duplicate competition slots did not select a safe repair" >&2; exit 1; }
+
 head -n 1 "$QUALIFIED" >"$TEST_TMP/one-qualified.tsv"
 build_competition_targets "$CURRENT" "$TEST_TMP/one-qualified.tsv" "$TARGETS"
 awk -F '\t' '$1=="auto3.example.test" && $2=="104.17.1.10"{a=1} $1=="auto4.example.test" && $2=="104.17.137.93" && $5=="stable_mirror"{b=1} END{exit(a&&b)?0:1}' "$TARGETS"
