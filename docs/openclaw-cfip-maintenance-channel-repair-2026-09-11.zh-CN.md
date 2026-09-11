@@ -13,12 +13,17 @@ CFIP 生产链路正常，问题仅在 root-only 维护审计工具：旧执行�
 - 在 .140 安装 /home/ubuntu/.openclaw/tools/cfip-maintenance-readonly.sh，权限 0700。
 - 新工具不读取 ssh_ollama.expect，不保存或输出密码，只使用严格 SSH 别名和 sudo -n。
 - 旧工具若存在已保留为 cfip-maintenance-readonly.sh.pre-20260911。
+- .140 入口已修正为只调用固定命令 /usr/local/sbin/cfip-maintenance-audit；不再尝试 sudo -n sh -s，避免超出 .110 的最小 sudo 白名单。
 
 ## 当前阻塞
 
 .110 当前 sudo -n 返回：sudo: a password is required。
 
 这说明 SSH 密钥通道可用，但 ollama 用户没有免密执行 root 审计命令的权限。新工具按安全设计直接失败，不回退到过期密码，也不猜测密码。
+
+用户执行安装器后，固定审计授权安装成功；随后第一次远程调用因 .140 入口仍调用 sudo -n sh -s 而失败。入口已改为直接调用固定审计命令，第二次完整审计成功。
+
+成功审计结果：Sidecar Result=success，timer active/enabled，报告 5 行、导出 3 行，无 Xray 残留、无瞬时容器、cfip-direct 附着 0；sub2api、PostgreSQL、Redis 均 running/healthy，Docker PID 1144，Ollama 无驻留模型。.110 直连 Google/YouTube 仍为 HTTP 000 超时，但这不是安装或 Sidecar 失败。
 
 ## 永久修复选项
 
