@@ -103,3 +103,19 @@ P3：Windows 测试环境缺少原生 flock。建议将锁竞争运行时测试�
 5. 将 Linux flock 运行时测试放入 Linux CI，继续保持 Windows Git Bash 只做便携测试。
 
 截至本次核验，没有需要立即修改生产配置的 Bug。
+
+## 十、维护通道最终收口（2026-09-11 20:50 CST）
+
+用户在 .110 上执行上传的安装器成功，输出 CFIP_MAINTENANCE_INSTALL=OK 和 CFIP_MAINTENANCE_TEST=OK。随后修正 .140 入口，使其直接调用 .110 的固定命令 /usr/local/sbin/cfip-maintenance-audit，不再尝试未被授权的 sudo -n sh -s。
+
+最终 root-only 只读审计通过：
+
+- Sidecar Result=success，timer active/enabled；
+- 最新报告 5 行，导出 3 行；
+- 无 Xray 残留、无瞬时 CFIP 容器，cfip-direct 附着数为 0；
+- sub2api、PostgreSQL、Redis 均 running/healthy；
+- Docker PID 为 1144，Ollama 无驻留模型。
+
+.110 直连 Google/YouTube 仍返回 HTTP 000 超时，但 VM36 代理路径此前实时核验均为 HTTP 204；该现象不属于维护授权或 Sidecar 失败，不触发生产改动。
+
+至此，CFIP 生产链路和 OpenClaw 维护链路均已收口。后续只保留自然周期观察，不再扩大代码或网络优化。
