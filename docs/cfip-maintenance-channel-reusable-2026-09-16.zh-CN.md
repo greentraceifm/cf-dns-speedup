@@ -11,11 +11,14 @@
 ```text
 本机 -> 192.168.1.140 OpenClaw -> 192.168.1.110
 本机 -> 192.168.1.140 OpenClaw -> VM36 192.168.1.254
+本机 -> 192.168.1.140 OpenClaw -> MikroTik 192.168.1.1
 ```
 
 - `.140` 是唯一维护跳板。
 - `.110` 是 Sidecar 和 Sub2API 主机。
 - VM36 `.254` 是生产 OpenWrt、PassWall、DNS 和 CFIP 消费端。
+- MikroTik `.1` 是 LAN 网关和 DNS 转发入口；RouterOS 维护必须复用
+  `docs/mikrotik-maintenance-channel-reusable-2026-09-20.zh-CN.md`。
 - VM33 是最终网络回滚节点，VM37 是隔离提取机，不属于日常维护链路。
 
 ## `.110` 固定入口
@@ -42,6 +45,19 @@ VM36 授权文件权限 600，正常 sysupgrade 备份清单已确认包含该�
 
 旧 `openwrt-smartdns.env` 密码入口保留给其他历史用途，本手册不再用它登录 VM36，也不修改该文件。普通只读失败先区分网络、主机身份、密钥认证和远端命令，不重复尝试旧密码。
 
+## MikroTik `.1` 固定入口
+
+RouterOS `.1` 不使用 OpenWrt/Linux 命令。必须先进入 `.140`，再使用
+`.140` 上的专用 RSA 私钥和既有 known_hosts 登录 `greentraceifm@192.168.1.1`。
+RouterOS 6.49.19 只在该次 SSH 调用中添加
+`PubkeyAcceptedAlgorithms=+ssh-rsa`；不得关闭严格主机校验或启用密码回退。
+
+标准命令、只读检查、授权边界、公钥撤销和 DNS 回滚见：
+`docs/mikrotik-maintenance-channel-reusable-2026-09-20.zh-CN.md`
+
+本机维护 `.1` 时，普通只读检查不再重复询问授权；DNS、路由、防火墙、
+PPPoE、SSH 公钥、用户、重启和删除操作仍需在临界动作前确认。
+
 ## 自动执行规则
 
 - 普通只读诊断、状态查询、报告生成和本地测试：直接按本手册执行，不重复询问用户授权。
@@ -67,6 +83,28 @@ VM36 授权文件权限 600，正常 sysupgrade 备份清单已确认包含该�
 2026-09-16 17:00 CST 从 `.140` 对 VM36 DNS 进行了三轮只读查询：`auto3` 在 `.1`、`.254`、`1.1.1.1` 均返回 `NOERROR -> 104.26.1.38`；其他四个槽位三路也一致。因此此前空答案按一次性或瞬时转发异常收口，不执行 DNS 修复。
 
 上述是 9 月 16 日的 DNS 结果。9 月 20 日已恢复密钥 SSH；新的 45 次 DNS 查询和 Cloudflare 五记录 GET 也一致，详见当天整体运行审计，不把历史样本当成当天证据。
+
+## 常驻服务重启验收
+
+仅在用户明确授权短暂中断时，才执行本节；普通巡检与自然 Sidecar 周期不需要重启。
+
+2026-09-20 已完成一次受控演练：
+
+- `.110` 只能通过白名单入口 `sudo -n /usr/local/sbin/sub2api-maintenance restart` 重启 Sub2API 常驻容器。重启后必须确认 Sub2API、PostgreSQL、Redis 均 healthy，Web 与 Ollama 健康检查均为 HTTP 200。
+- 不手动执行 `cfip-sidecar.service restart` 或 `start`。该 service 是一次性真实测速任务，手动启动会产生额外扫描；只核验其 timer 为 active/enabled，并由下一自然周期验证。
+- VM36 重启 PassWall 前，应检查生产配置实际生效的项目锁；重启后等待 Xray、PassWall DNS、ChinaDNS 与 `1070/1041/11400/15353` 监听恢复，再检查默认路径和显式 SOCKS `127.0.0.1:1070` 的 Google/YouTube 均为 HTTP 204。
+- 重启后核验唯一 `04:35` 同步 cron 仍在、旧 `06:30` 任务不存在，并对 `auto` 至 `auto4` 比较 VM36 本地与公共 resolver 的实际 A 答案。
+
+DNS 验收不得把答案写死为 `104.*` 或任何固定网段。2026-09-20 当前正确答案之一为 `162.159.134.98`；此前仅因临时验收脚本错误假定 `104.*` 而误报失败。对于这些预期有 A 记录的槽位，空答案、`SERVFAIL/NXDOMAIN`、超时或 resolver 答案不一致需要进一步核验，不单凭一次差异判定故障。
+
+### 验收记录的更正与限制
+
+- 重启批次检查的是 `/var/lock/cfip-*.lock`，并非代码默认的项目锁，不能作为真实锁空闲证据。代码默认路径为 `/tmp/cfip-sidecar-auto-sync.lock`、`/tmp/cfip-candidate-gate.lock`、`/tmp/cf-dns-speedup.lock`，另有 `/tmp/cf-dns-speedup-passwall-node-observe.lock`；配置可覆盖，使用前核对生效路径。一次释放即结束的探测不能防止后续竞争。
+- 重启批次仅计数同步脚本行，并以字符串 `06:30` 检索旧任务，未重新严格解析 cron 的分钟/小时字段；唯一 `04:35` 与旧任务不存在的完整证据来自同日较早审计，不冒充重启后新证据。
+- `pgrep -x xray` 未命中不能单独判定进程消失；本次通过实际进程路径及监听确认。该 PassWall init 不支持 `status`，返回用法提示不是服务失败。
+- 重启后的 HTTP 测试使用了 `curl -k`，只能证明连通性，不能证明 TLS 证书校验通过；今后标准验收不使用 `-k`。
+- 实际仅重启 Sub2API 应用容器和 PassWall，没有重启 VM、宿主机、Docker、Ollama、主 DNS 服务或 OpenClaw。Sub2API 是同机关联服务，不是 CFIP 数据同步执行器，日常 CFIP 检查不需要重启它。
+- 没有手动重跑 Sidecar/同步，没有在重启后重新做 Cloudflare API GET 或完整三路 45 次 DNS 查询；自然周期成功证据来自重启前。未精确测量代理中断时长，不承诺下次永不报错。
 
 ## 回滚与安全边界
 
