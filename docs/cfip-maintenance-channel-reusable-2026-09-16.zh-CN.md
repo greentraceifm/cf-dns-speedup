@@ -1,5 +1,7 @@
 # CFIP 固定维护链路复用手册（2026-09-16）
 
+> 2026-09-20 更新：VM36 专用密钥入口已通过三次独立连接和实际只读审计；原密码方式不再用于日常维护，不得回退重试。见 `cfip-vm36-key-maintenance-2026-09-20.zh-CN.md`。`.110` 原固定入口不变。
+
 ## 目的
 
 以后排查或维护 CFIP、Sidecar、VM36 DNS 和 PassWall 时，统一复用本手册，不再反复询问如何连接或重复确认普通只读授权。
@@ -28,38 +30,17 @@
 
 ## VM36 固定入口
 
-VM36 维护配置只允许在 `.140` 进程内读取：
+日常统一在 `.140` 调用：
 
-```text
-/home/ubuntu/.config/openclaw/openwrt-smartdns.env
+```sh
+/home/ubuntu/.openclaw/tools/cfip-vm36-ssh.sh --check
 ```
 
-使用方式：
+已审核的只读脚本通过同一入口的 `--stdin` 传递。固定入口隔离默认 SSH 配置，强制专用密钥、严格 known_hosts、BatchMode 和禁止密码回退；私钥仅在 `.140`，不得读取或拷回本机。
 
-1. 在 `.140` 进程内加载配置。
-2. 将密码只放入进程环境变量 `SSHPASS`。
-3. 使用 `sshpass -e ssh`，不得把密码放入命令行参数、脚本文件、日志或输出。
-4. 强制使用：
+VM36 授权文件权限 600，正常 sysupgrade 备份清单已确认包含该文件。恢复旧快照、重建 VM 或重装 `.140` 仍需单独恢复密钥，不保证这些操作后自动可用。
 
-```text
--o StrictHostKeyChecking=yes
--o UserKnownHostsFile=/home/ubuntu/.ssh/known_hosts
--o ConnectTimeout=10
-```
-
-5. 只执行预先限定的只读脚本或通过 stdin 传递的只读诊断内容。
-6. 完成后清除 `SSHPASS` 和配置变量。
-
-### 重要调用约束
-
-不得同时使用 `BatchMode=yes` 和 `sshpass -e` 做密码认证。`BatchMode=yes` 会禁止密码提示，导致正确密码也返回 `Permission denied (publickey,password)`。密码方式应明确使用：
-
-```text
--o PreferredAuthentications=password
--o PubkeyAuthentication=no
-```
-
-同时仍保持严格主机密钥校验。
+旧 `openwrt-smartdns.env` 密码入口保留给其他历史用途，本手册不再用它登录 VM36，也不修改该文件。普通只读失败先区分网络、主机身份、密钥认证和远端命令，不重复尝试旧密码。
 
 ## 自动执行规则
 
@@ -85,7 +66,7 @@ VM36 维护配置只允许在 `.140` 进程内读取：
 
 2026-09-16 17:00 CST 从 `.140` 对 VM36 DNS 进行了三轮只读查询：`auto3` 在 `.1`、`.254`、`1.1.1.1` 均返回 `NOERROR -> 104.26.1.38`；其他四个槽位三路也一致。因此此前空答案按一次性或瞬时转发异常收口，不执行 DNS 修复。
 
-`.140 -> VM36` 的 SSH 认证仍需独立恢复，但不影响从 `.140` 直接访问 VM36 的 53 端口完成本次 DNS 只读诊断。
+上述是 9 月 16 日的 DNS 结果。9 月 20 日已恢复密钥 SSH；新的 45 次 DNS 查询和 Cloudflare 五记录 GET 也一致，详见当天整体运行审计，不把历史样本当成当天证据。
 
 ## 回滚与安全边界
 
