@@ -185,6 +185,14 @@ cfst 总超时：3600
 
 旧的 06:30 全量优选 cron 会停止或重启代理，已经永久禁用，不得恢复为无人值守任务。当前候选发现由独立 Sidecar 的 systemd timer 在约 03:30 运行；路由器 canary 仍是手动、隔离、无 PassWall 重启的动作。
 
+生产自动链路不经过 OpenClaw 维护跳板：Sidecar 在 `.110` 生成只读候选导出，
+VM36 在约 04:35 通过固定受限 SSH 直接从 `.110` 拉取，再执行本机 PassWall 门控
+和 Cloudflare 写入。`.140` 仅用于人工维护、审计和跳板；它夜间关机不会中断这条
+生产数据面。维护手册见 `docs/cfip-maintenance-channel-reusable-2026-09-16.zh-CN.md`。
+
+VM36 使用 Dropbear SSH 客户端。诊断时应复用 `sidecar-auto-sync.sh` 的原始调用，
+不要强行加入 OpenSSH 专用参数；否则可能把兼容性问题误报为候选导出失败。
+
 无人值守路由器配置必须保持：
 
 ```text
