@@ -60,6 +60,36 @@ CFIP 自动同步由 VM36 直接使用 `/root/.ssh/cfip-sidecar-export` 从 `.11
 
 该入口通过 `ollama-server` SSH 别名进入 `.110`，并调用 `.110` 上 root-owned 的固定审计命令。必须保持严格主机密钥校验；不得恢复旧 `ssh_ollama.expect` 密码提取方式，不得使用任意 `sudo -n sh -s` 或任意 root shell。
 
+### 本机固定调用与常见误用
+
+本机巡检优先执行项目入口：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Invoke-CfipReadonlyAudit.ps1
+```
+
+入口通过本机严格 SSH 到 `.140`，依次调用 `.110` 和 VM36 的固定工具。若需逐项人工执行：
+
+```powershell
+ssh.exe -F NUL -i "$env:USERPROFILE\.ssh\openclaw_ubuntu_20261003" `
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes `
+  -o UserKnownHostsFile="$env:USERPROFILE\.ssh\known_hosts" `
+  -o ConnectTimeout=10 ubuntu@192.168.1.140 `
+  /home/ubuntu/.openclaw/tools/cfip-maintenance-readonly.sh
+```
+
+在 VM36 密钥检查通过后，再从本机通过 `.140` 固定入口传递已经审核的只读脚本：
+
+```powershell
+ssh.exe -F NUL -i "$env:USERPROFILE\.ssh\openclaw_ubuntu_20261003" `
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes `
+  -o UserKnownHostsFile="$env:USERPROFILE\.ssh\known_hosts" `
+  -o ConnectTimeout=10 ubuntu@192.168.1.140 `
+  /home/ubuntu/.openclaw/tools/cfip-vm36-ssh.sh --check
+```
+
+**不要**在 `.140` 本机直接运行 `sudo -n /usr/local/sbin/cfip-maintenance-audit`。该 sudo 白名单属于 `.110` 的 `ollama` 账户；直接在 `.140` 执行会得到 `sudo: a password is required`，这是目标主机用错，不是维护手册丢失或 `.110` 授权失效。应调用上面的 `.140` 固定入口，由它通过 `ollama-server` 到 `.110` 执行。任何固定入口失败都立即停止，不尝试旧密码、任意 shell、关闭主机校验或绕过 `.140`。
+
 ## VM36 固定入口
 
 日常统一在 `.140` 调用：
@@ -100,6 +130,7 @@ PPPoE、SSH 公钥、用户、重启和删除操作仍需在临界动作前确�
 - 已明确授权的低风险修复：按既定回滚点、原子替换和后检规则执行，不重复询问同一授权。
 - 生产写入、Cloudflare 记录变更、PassWall/DNS/VM 重启、凭据变更、删除或不可逆操作：仍需在临界动作前确认。
 - 如果已有受保护凭据认证失败：最多检查一次调用方式、一次行尾格式和既有密钥；随后停止并报告精确阻塞，不猜密码、不扫描其他文件、不绕过跳板。
+- 在报告 `.110 sudo` 故障前，先确认调用的是 `.140` 上的 `cfip-maintenance-readonly.sh`，而不是在 `.140` 直接调用 `.110` 的 sudo 命令。
 - 不能从 OpenClaw 记忆恢复不存在或已失效的密码。OpenClaw 记忆和 Notion 只记录入口、规则、状态和回滚，不记录密码、Token、UUID、订阅或完整配置。
 
 ### `.140` 夜间关机时的故障判定
