@@ -10,6 +10,7 @@ STAGING_FILE="$APP_DIR/candidate-staging/sidecar-candidates.latest.tsv"
 QUALIFIED_FILE="$APP_DIR/router-candidate-competition-qualified.tsv"
 CFIP_AUTO_SYNC_RECORDS="auto3.example.test auto4.example.test"
 CFIP_AUTO_SYNC_PRIMARY_RECORDS="auto.example.test auto1.example.test auto2.example.test"
+CF_RECORD_NAMES="auto.example.test auto1.example.test auto2.example.test auto3.example.test auto4.example.test"
 mkdir -p "$(dirname "$STAGING_FILE")"
 cat >"$STAGING_FILE" <<'DATA'
 schema_version	exported_epoch	observed_at	candidate_ip	direct_MBps	round1_MBps	round2_MBps	min_MBps	avg_MBps	http1	http2	status	path_mode	candidate_tier
@@ -84,7 +85,47 @@ if primary_records_have_duplicates "$MIRROR_DUP_CURRENT"; then :; else
   echo "duplicate primary detector missed duplicate records" >&2; exit 1
 fi
 
+GLOBAL_DUP_CURRENT="$TEST_TMP/global-duplicate-current.tsv"
+printf 'auto.example.test\t104.26.1.38\nauto1.example.test\t104.26.1.38\nauto2.example.test\t104.17.129.81\nauto3.example.test\t104.26.15.28\nauto4.example.test\t104.26.1.38\n' >"$GLOBAL_DUP_CURRENT"
+if (assert_competition_update_safe "$GLOBAL_DUP_CURRENT" auto4.example.test 104.26.1.38 challenger) >/dev/null 2>&1; then
+  echo "cross-pool duplicate candidate was accepted" >&2; exit 1
+fi
+if ! (assert_competition_update_safe "$GLOBAL_DUP_CURRENT" auto4.example.test 104.26.1.38 stable_mirror); then
+  echo "stable mirror exception was rejected" >&2; exit 1
+fi
+
+UNCHANGED_GLOBAL="$TEST_TMP/global-unchanged.tsv"
+cp "$GLOBAL_DUP_CURRENT" "$UNCHANGED_GLOBAL"
+assert_record_snapshot_unchanged "$GLOBAL_DUP_CURRENT" "$UNCHANGED_GLOBAL"
+CHANGED_GLOBAL="$TEST_TMP/global-changed.tsv"
+sed 's/auto2.example.test\t104.17.129.81/auto2.example.test\t104.17.130.81/' \
+  "$GLOBAL_DUP_CURRENT" >"$CHANGED_GLOBAL"
+if (assert_record_snapshot_unchanged "$GLOBAL_DUP_CURRENT" "$CHANGED_GLOBAL") >/dev/null 2>&1; then
+  echo "concurrent five-slot change was accepted" >&2; exit 1
+fi
+
+VALID_TRANSITION="$TEST_TMP/global-valid-transition.tsv"
+printf 'auto.example.test\t104.26.1.38\nauto1.example.test\t104.26.1.38\nauto2.example.test\t104.17.129.81\nauto3.example.test\t104.26.15.28\nauto4.example.test\t104.17.135.183\n' >"$VALID_TRANSITION"
+verify_record_transition "$GLOBAL_DUP_CURRENT" "$VALID_TRANSITION" \
+  auto4.example.test 104.17.135.183 challenger
+UNEXPECTED_TRANSITION="$TEST_TMP/global-unexpected-transition.tsv"
+printf 'auto.example.test\t104.26.1.38\nauto1.example.test\t104.26.1.38\nauto2.example.test\t104.17.135.183\nauto3.example.test\t104.26.15.28\nauto4.example.test\t104.17.135.183\n' >"$UNEXPECTED_TRANSITION"
+if (verify_record_transition "$GLOBAL_DUP_CURRENT" "$UNEXPECTED_TRANSITION" \
+    auto4.example.test 104.17.135.183 challenger) >/dev/null 2>&1; then
+  echo "post-update cross-pool duplicate was accepted" >&2; exit 1
+fi
+
+REPORT_FILE="$TEST_TMP/sidecar-auto-sync.latest.tsv"
+HISTORY_FILE="$TEST_TMP/sidecar-auto-sync-history.tsv"
+DUPLICATE_GUARD_REASON=duplicate_with=auto.example.test
+record_duplicate_guard_rejection 104.17.135.183 auto4.example.test 104.26.1.38 ""
+awk -F '\t' 'NR==2 && $2=="awaiting_safe_competition_transition" && $4=="auto4.example.test" && $6=="duplicate_guard_rejected:duplicate_with=auto.example.test"{ok=1} END{exit ok?0:1}' "$REPORT_FILE" \
+  || { echo "duplicate guard rejection did not refresh latest report with reason" >&2; exit 1; }
+[ "$(awk 'END {print NR}' "$HISTORY_FILE")" -eq 2 ] \
+  || { echo "duplicate guard rejection was not appended to report history" >&2; exit 1; }
+
 PRIMARY_QUALIFIED="$TEST_TMP/primary-qualified.tsv"
+PRIMARY_CANARY_HISTORY_FILE="$TEST_TMP/primary-canary-history.tsv"
 printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.137.93\t3\t3\t4.00\t4.10\t2026-07-29 04:20:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.153.15\t3\t3\t4.60\t4.70\t2026-07-29 04:21:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n104.17.134.190\t3\t3\t4.20\t4.30\t2026-07-29 04:22:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$PRIMARY_QUALIFIED"
 PROMOTION_QUALIFIED="$TEST_TMP/promotion-qualified.tsv"
 printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.1.10\t3\t3\t5.10\t5.20\t2026-07-29 04:16:00\tcompetition_qualified\trouter_isolated_xray\n104.17.1.11\t3\t3\t4.90\t5.00\t2026-07-29 04:17:00\tcompetition_qualified\trouter_isolated_xray\n' >"$PROMOTION_QUALIFIED"
@@ -95,9 +136,9 @@ build_primary_targets "$PROMOTION_CURRENT" "$PRIMARY_QUALIFIED" "$PROMOTION_QUAL
 [ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "complete primary baseline was not accepted" >&2; exit 1; }
 awk -F '\t' '$1=="auto.example.test" && $2=="104.17.1.10" && $5=="challenger"{a=1} $1=="auto1.example.test" && $2=="104.17.153.15"{b=1} $1=="auto2.example.test" && $2=="104.17.134.190"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
   || { echo "primary ranking or 25 percent promotion is wrong" >&2; exit 1; }
-choose_pending_target "$PROMOTION_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
-awk -F '\t' 'NR==1 && $1=="auto.example.test" && $2=="104.17.1.10" && $3=="104.17.137.93"{ok=1} END{exit ok?0:1}' "$PENDING" \
-  || { echo "primary plan did not select exactly the first mismatched record" >&2; exit 1; }
+choose_pending_primary_target "$PROMOTION_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
+[ ! -s "$PENDING" ] \
+  || { echo "primary plan selected a candidate already occupied by a competition slot" >&2; exit 1; }
 
 head -n 1 "$PRIMARY_QUALIFIED" >"$TEST_TMP/empty-primary-qualified.tsv"
 build_primary_targets "$PROMOTION_CURRENT" "$TEST_TMP/empty-primary-qualified.tsv" "$PROMOTION_QUALIFIED" "$PRIMARY_TARGETS"
@@ -118,6 +159,29 @@ build_primary_targets "$CURRENT" "$PRIMARY_QUALIFIED" "$PROMOTION_QUALIFIED" "$P
 if grep -q $'\t104.17.1.10\t' "$PRIMARY_TARGETS"; then
   echo "challenger outside auto3/auto4 entered primary targets" >&2; exit 1
 fi
+
+cat >"$PRIMARY_CANARY_HISTORY_FILE" <<'DATA'
+observed_at	candidate_ip	source_export_epoch	round1_MBps	round2_MBps	min_MBps	avg_MBps	http1	http2	bytes1	bytes2	status	path_mode
+2026-10-31 04:15:00	104.17.200.1	1793410500	1.20	1.00	1.00	1.10	200	200	20000000	20000000	low	router_primary_isolated_xray
+2026-11-01 04:15:00	104.17.200.1	1793496900	1.10	0.90	0.90	1.00	200	200	20000000	20000000	low	router_primary_isolated_xray
+2026-10-31 04:16:00	104.17.200.2	1793410500	1.30	1.10	1.10	1.20	200	200	20000000	20000000	low	router_primary_isolated_xray
+2026-11-01 04:16:00	104.17.200.2	1793496900	1.20	1.00	1.00	1.10	200	200	20000000	20000000	low	router_primary_isolated_xray
+2026-11-01 04:17:00	104.17.200.3	1793496900	4.20	4.10	4.10	4.15	200	200	20000000	20000000	pass	router_primary_isolated_xray
+DATA
+REPAIR_CURRENT="$TEST_TMP/repair-current.tsv"
+printf 'auto.example.test\t104.17.200.1\nauto1.example.test\t104.17.200.2\nauto2.example.test\t104.17.200.3\nauto3.example.test\t104.17.200.4\nauto4.example.test\t104.17.200.5\n' >"$REPAIR_CURRENT"
+REPAIR_PRIMARY="$TEST_TMP/repair-primary-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.200.3\t5\t5\t4.10\t4.20\t2026-11-01 04:17:00\tprimary_baseline_qualified\trouter_primary_isolated_xray\n' >"$REPAIR_PRIMARY"
+REPAIR_COMPETITION="$TEST_TMP/repair-competition-qualified.tsv"
+printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twindow_avg_MBps\tlast_observed_at\tstatus\tpath_mode\n104.17.200.6\t4\t4\t4.24\t4.30\t2026-11-01 04:18:00\tcompetition_qualified\trouter_isolated_xray\n' >"$REPAIR_COMPETITION"
+build_primary_targets "$REPAIR_CURRENT" "$REPAIR_PRIMARY" "$REPAIR_COMPETITION" "$PRIMARY_TARGETS"
+[ "$PRIMARY_REPAIR_REQUIRED" -eq 1 ] && [ "$PRIMARY_REPAIR_READY" -eq 1 ] \
+  || { echo "degraded primary repair was not prioritized" >&2; exit 1; }
+awk -F '\t' '$1=="auto.example.test" && $2=="104.17.200.6" && $5=="degraded_repair"{a=1} $1=="auto1.example.test" && $2=="104.17.200.2" && $5=="degraded_hold"{b=1} $1=="auto2.example.test" && $2=="104.17.200.3"{c=1} END{exit(a&&b&&c)?0:1}' "$PRIMARY_TARGETS" \
+  || { echo "degraded primary repair did not preserve healthy slots" >&2; exit 1; }
+choose_pending_primary_target "$REPAIR_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
+awk -F '\t' 'NR==1 && $1=="auto.example.test" && $2=="104.17.200.6"{ok=1} END{exit ok?0:1}' "$PENDING" \
+  || { echo "degraded primary repair did not produce a safe single-record update" >&2; exit 1; }
 
 DUPLICATE_CURRENT="$TEST_TMP/duplicate-current.tsv"
 printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.153.15\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.135.183\nauto4.example.test\t104.17.153.186\n' >"$DUPLICATE_CURRENT"
@@ -159,8 +223,8 @@ printf 'candidate_ip\tconsecutive_pass_days\tpass_exports\twindow_min_MBps\twind
 build_primary_targets "$FAILED_DUPLICATE_CURRENT" "$FAILED_DUPLICATE_PRIMARY" "$FAILED_DUPLICATE_COMPETITION" "$PRIMARY_TARGETS"
 [ "$PRIMARY_BASELINE_READY" -eq 1 ] || { echo "failed duplicate incumbent blocked safe primary repair" >&2; exit 1; }
 choose_pending_primary_target "$FAILED_DUPLICATE_CURRENT" "$PRIMARY_TARGETS" "$PENDING"
-awk -F '\t' '$1=="auto1.example.test" && $2!="104.17.129.81" && $3=="104.17.129.81" && ($6=="primary_history" || $6=="duplicate_repair"){ok=1} END{exit ok?0:1}' "$PENDING" \
-  || { echo "failed duplicate incumbent did not select a qualified distinct replacement" >&2; exit 1; }
+[ ! -s "$PENDING" ] \
+  || { echo "primary repair selected a candidate already occupied by a competition slot" >&2; exit 1; }
 
 UNSAFE_SWAP_CURRENT="$TEST_TMP/unsafe-primary-swap-current.tsv"
 printf 'auto.example.test\t104.17.153.15\nauto1.example.test\t104.17.129.81\nauto2.example.test\t104.17.134.190\nauto3.example.test\t104.17.130.125\nauto4.example.test\t104.17.153.186\n' >"$UNSAFE_SWAP_CURRENT"

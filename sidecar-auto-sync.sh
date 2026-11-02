@@ -11,6 +11,7 @@ QUALIFIED_FILE="${CFIP_ROUTER_CANARY_QUALIFIED_FILE:-$APP_DIR/router-candidate-c
 CANARY_HISTORY_FILE="${CFIP_ROUTER_CANARY_HISTORY_FILE:-$APP_DIR/router-candidate-canary-history.tsv}"
 WATCHLIST_FILE="${CFIP_AUTO_SYNC_WATCHLIST_FILE:-$APP_DIR/router-candidate-watchlist.tsv}"
 PRIMARY_QUALIFIED_FILE="${CFIP_ROUTER_PRIMARY_CANARY_QUALIFIED_FILE:-$APP_DIR/router-primary-baseline-qualified.tsv}"
+PRIMARY_CANARY_HISTORY_FILE="${CFIP_ROUTER_PRIMARY_CANARY_HISTORY_FILE:-$APP_DIR/router-primary-canary-history.tsv}"
 REPORT_FILE="${CFIP_AUTO_SYNC_REPORT_FILE:-$APP_DIR/sidecar-auto-sync.latest.tsv}"
 HISTORY_FILE="${CFIP_AUTO_SYNC_HISTORY_FILE:-$APP_DIR/sidecar-auto-sync-history.tsv}"
 STATE_FILE="${CFIP_AUTO_SYNC_STATE_FILE:-$APP_DIR/sidecar-auto-sync.state}"
@@ -188,6 +189,13 @@ write_report() {
     chmod 600 "$HISTORY_FILE"
   fi
   tail -n 1 "$REPORT_FILE" >>"$HISTORY_FILE"
+}
+
+record_duplicate_guard_rejection() {
+  local candidate="$1" target="$2" previous="$3" phase="$4"
+  write_report awaiting_safe_competition_transition "$candidate" "$target" "$previous" \
+    "duplicate_guard_rejected${phase}:${DUPLICATE_GUARD_REASON}"
+  log "safe single-record update rejected by global duplicate guard${phase}; no Cloudflare write"
 }
 
 pull_export() {
@@ -462,6 +470,8 @@ build_competition_targets() {
   local current_records="$1" qualified="$2" output="$3"
   local -a competition_names=() primary_names=() challengers=() mins=() avgs=() mirrors=()
   local name ip days minimum average desired source index mirror mirror_used=""
+  local current_name current_ip occupied="" qualified_seen=0 blocked_by_occupied=0
+  COMPETITION_TARGETS_BLOCKED_BY_DEDUPE=0
   read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
   read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
   [ "${#competition_names[@]}" -eq 2 ] || die "exactly two competition records are required"
@@ -473,12 +483,24 @@ build_competition_targets() {
   [ -n "$primary1" ] && [ -n "$primary2" ] && [ -n "$primary3" ] \
     || die "cannot resolve all primary record contents"
 
+  for current_name in "${primary_names[@]}" "${competition_names[@]}"; do
+    current_ip="$(record_content "$current_records" "$current_name")"
+    [ -n "$current_ip" ] || die "cannot resolve all five configured slot contents"
+    occupied="$occupied $current_ip"
+  done
+
   while IFS=$'\t' read -r ip days minimum average; do
     [ -n "$ip" ] || continue
-    case "$ip" in "$primary1"|"$primary2"|"$primary3") continue ;; esac
+    qualified_seen=1
+    case " $occupied " in
+      *" $ip "*) blocked_by_occupied=1; continue ;;
+    esac
     challengers+=("$ip"); mins+=("$minimum"); avgs+=("$average")
     [ "${#challengers[@]}" -ge 2 ] && break
   done <"$qualified"
+  if [ "$qualified_seen" -eq 1 ] && [ "${#challengers[@]}" -eq 0 ] && [ "$blocked_by_occupied" -eq 1 ]; then
+    COMPETITION_TARGETS_BLOCKED_BY_DEDUPE=1
+  fi
 
   : >"$output"
   for index in 0 1; do
@@ -507,16 +529,138 @@ build_competition_targets() {
 }
 
 PRIMARY_BASELINE_READY=0
+PRIMARY_REPAIR_REQUIRED=0
+PRIMARY_REPAIR_READY=0
+PRIMARY_REPAIR_TARGET=""
+PRIMARY_REPAIR_REASON=""
 COMPETITION_TRANSITION_STATE=none
+COMPETITION_TARGETS_BLOCKED_BY_DEDUPE=0
+
+primary_ip_is_qualified() {
+  local candidate="$1" primary_qualified="$2" competition_qualified="$3"
+  awk -F '\t' -v ip="$candidate" -v primary_file="$primary_qualified" \
+      -v competition_file="$competition_qualified" '
+    FILENAME == primary_file && FNR > 1 && $1 == ip && $7 == "primary_baseline_qualified" {found=1}
+    FILENAME == competition_file && FNR > 1 && $1 == ip && $7 == "competition_qualified" {found=1}
+    END {exit found ? 0 : 1}
+  ' "$primary_qualified" "$competition_qualified"
+}
+
+primary_slot_is_degraded() {
+  local candidate="$1"
+  [ -s "$PRIMARY_CANARY_HISTORY_FILE" ] || return 1
+  awk -F '\t' -v ip="$candidate" -v floor="$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" '
+    NR == 1 || $2 != ip {next}
+    {
+      day=substr($1, 1, 10)
+      if (!(day in day_index)) {
+        day_index[day]=++day_count
+        day_order[day_count]=day
+      }
+      day_number=day_index[day]
+      if ($12 != "pass" || ($6 + 0) < (floor + 0)) bad[day_number]=1
+      if ($8 != "200" || $9 != "200" || ($10 + 0) < 20000000 || ($11 + 0) < 20000000)
+        hard[day_number]=1
+    }
+    END {
+      if (day_count < 1) exit 1
+      latest=day_index[day_order[day_count]]
+      if (hard[latest]) exit 0
+      if (day_count < 2) exit 1
+      previous=day_index[day_order[day_count - 1]]
+      exit (bad[latest] && bad[previous]) ? 0 : 1
+    }
+  ' "$PRIMARY_CANARY_HISTORY_FILE"
+}
+
+select_primary_repair_candidate() {
+  local current_records="$1" primary_qualified="$2" competition_qualified="$3" output="$4"
+  awk -F '\t' -v current_file="$current_records" -v primary_file="$primary_qualified" \
+      -v competition_file="$competition_qualified" -v primary_min="$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" '
+    FILENAME == current_file {
+      occupied[$2]=1
+      next
+    }
+    FILENAME == primary_file && FNR > 1 && $7 == "primary_baseline_qualified" {
+      if (($4 + 0) >= (primary_min + 0)) add($1, $2, $4, $5, "primary_history")
+      next
+    }
+    FILENAME == competition_file && FNR > 1 && $7 == "competition_qualified" {
+      if (($4 + 0) >= (primary_min + 0)) add($1, $2, $4, $5, "competition_history")
+      next
+    }
+    function add(ip, days, minimum, average, source) {
+      if (ip == "" || (ip in occupied)) return
+      if (!(ip in minimums) || (minimum + 0) > minimums[ip] ||
+          ((minimum + 0) == minimums[ip] && (average + 0) > averages[ip]) ||
+          ((minimum + 0) == minimums[ip] && (average + 0) == averages[ip] && (days + 0) > days_by_ip[ip])) {
+        days_by_ip[ip]=days + 0
+        minimums[ip]=minimum + 0
+        averages[ip]=average + 0
+        sources[ip]=source
+      }
+    }
+    END {
+      for (ip in minimums)
+        printf "%s\t%d\t%.2f\t%.2f\t%s\n", ip, days_by_ip[ip], minimums[ip], averages[ip], sources[ip]
+    }
+  ' "$current_records" "$primary_qualified" "$competition_qualified" \
+    | rank_candidate_rows 1 >"$output"
+}
 
 build_primary_targets() {
   local current_records="$1" primary_qualified="$2" competition_qualified="$3" output="$4"
   local pool="$output.pool.$$" ranked="$output.ranked.$$" rc=0 index=0 name pool_rows
+  local repair_candidate_file="$output.repair.$$" repair_row=""
+  local degraded_target="" current_candidate repair_candidate repair_days repair_min repair_avg repair_source
   local -a primary_names=() winners=() mins=() avgs=() sources=()
   read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
   [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
   : >"$output"
   PRIMARY_BASELINE_READY=0
+  PRIMARY_REPAIR_REQUIRED=0
+  PRIMARY_REPAIR_READY=0
+  PRIMARY_REPAIR_TARGET=""
+  PRIMARY_REPAIR_REASON=""
+
+  # A degraded primary gets first claim on a safe, already qualified
+  # candidate. This prevents the competition planner from consuming the only
+  # good candidate while a slow primary remains exposed.
+  for name in "${primary_names[@]}"; do
+    current_candidate="$(record_content "$current_records" "$name")"
+    [ -n "$current_candidate" ] || die "cannot resolve all primary record contents"
+    if ! primary_ip_is_qualified "$current_candidate" "$primary_qualified" "$competition_qualified" \
+       && primary_slot_is_degraded "$current_candidate"; then
+      PRIMARY_REPAIR_REQUIRED=1
+      if [ -z "$degraded_target" ]; then
+        degraded_target="$name"
+        PRIMARY_REPAIR_TARGET="$name"
+      fi
+    fi
+  done
+  if [ -n "$degraded_target" ]; then
+    select_primary_repair_candidate "$current_records" "$primary_qualified" \
+      "$competition_qualified" "$repair_candidate_file"
+    repair_row="$(head -n 1 "$repair_candidate_file" 2>/dev/null || true)"
+    if [ -n "$repair_row" ]; then
+      IFS=$'\t' read -r repair_candidate repair_days repair_min repair_avg repair_source <<<"$repair_row"
+      for name in "${primary_names[@]}"; do
+        current_candidate="$(record_content "$current_records" "$name")"
+        if [ "$name" = "$degraded_target" ]; then
+          printf '%s\t%s\t%s\t%s\tdegraded_repair\n' "$name" "$repair_candidate" \
+            "$repair_min" "$repair_avg" >>"$output"
+        else
+          printf '%s\t%s\t\t\tdegraded_hold\n' "$name" "$current_candidate" >>"$output"
+        fi
+      done
+      PRIMARY_REPAIR_READY=1
+      PRIMARY_REPAIR_REASON="degraded_primary_slot_needs_priority_repair"
+    else
+      PRIMARY_REPAIR_REASON="degraded_primary_slot_has_no_safe_qualified_replacement"
+    fi
+    rm -f "$repair_candidate_file"
+    return 0
+  fi
 
   awk -F '\t' -v current_file="$current_records" -v primary_file="$primary_qualified" \
       -v competition_file="$competition_qualified" -v primary_names="$CFIP_AUTO_SYNC_PRIMARY_RECORDS" \
@@ -743,22 +887,70 @@ choose_pending_target() {
 }
 
 assert_competition_update_safe() {
-  local current_records="$1" target="$2" candidate="$3" name current
-  local -a competition_names=()
-  read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
-  for name in "${competition_names[@]}"; do
-    [ "$name" = "$target" ] && continue
-    current="$(record_content "$current_records" "$name")"
-    [ -n "$current" ] || die "cannot determine current competition record content"
-    [ "$current" != "$candidate" ] \
-      || die "competition update would create a duplicate exposed slot"
+  local current_records="$1" target="$2" candidate="$3" source="${4:-challenger}"
+  local name current configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}"
+  local -a record_names=()
+  DUPLICATE_GUARD_REASON=""
+  [ "$source" = stable_mirror ] || [ "$source" = stable_mirror_unavailable ] || {
+    read -r -a record_names <<<"$(printf '%s' "$configured" | tr ', ' '\n\n' | sed '/^$/d' | tr '\n' ' ')"
+    [ "${#record_names[@]}" -eq 5 ] || die "global duplicate check requires exactly five configured slots"
+    for name in "${record_names[@]}"; do
+      [ "$name" = "$target" ] && continue
+      current="$(record_content "$current_records" "$name")"
+      [ -n "$current" ] || die "cannot determine current slot content for global duplicate check"
+      if [ "$current" = "$candidate" ]; then
+        DUPLICATE_GUARD_REASON="duplicate_with=$name"
+        return 1
+      fi
+    done
+  }
+}
+
+assert_record_snapshot_unchanged() {
+  local expected="$1" actual="$2" name expected_ip actual_ip configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}"
+  local -a record_names=()
+  read -r -a record_names <<<"$(printf '%s' "$configured" | tr ', ' '\n\n' | sed '/^$/d' | tr '\n' ' ')"
+  [ "${#record_names[@]}" -eq 5 ] || die "snapshot check requires exactly five configured slots"
+  for name in "${record_names[@]}"; do
+    expected_ip="$(record_content "$expected" "$name")"
+    actual_ip="$(record_content "$actual" "$name")"
+    [ -n "$expected_ip" ] && [ -n "$actual_ip" ] \
+      || die "cannot compare complete five-slot Cloudflare snapshot"
+    [ "$expected_ip" = "$actual_ip" ] \
+      || die "Cloudflare slot changed concurrently before update: $name"
   done
 }
+
+verify_record_transition() {
+  local before="$1" after="$2" target="$3" candidate="$4" source="$5"
+  local name before_ip after_ip configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}"
+  local -a record_names=()
+  read -r -a record_names <<<"$(printf '%s' "$configured" | tr ', ' '\n\n' | sed '/^$/d' | tr '\n' ' ')"
+  [ "${#record_names[@]}" -eq 5 ] || die "transition check requires exactly five configured slots"
+  for name in "${record_names[@]}"; do
+    before_ip="$(record_content "$before" "$name")"
+    after_ip="$(record_content "$after" "$name")"
+    [ -n "$before_ip" ] && [ -n "$after_ip" ] \
+      || die "cannot verify complete five-slot Cloudflare transition"
+    if [ "$name" = "$target" ]; then
+      [ "$after_ip" = "$candidate" ] || die "Cloudflare target content mismatch after update"
+    else
+      [ "$after_ip" = "$before_ip" ] \
+        || die "unexpected Cloudflare slot changed during update: $name"
+      if [ "$source" != stable_mirror ] && [ "$source" != stable_mirror_unavailable ]; then
+        [ "$after_ip" != "$candidate" ] \
+          || die "post-update five-slot verification found a duplicate with $name"
+      fi
+    fi
+  done
+}
+
 choose_pending_primary_target() {
   local current_records="$1" targets="$2" output="$3"
   local name desired minimum average source current other_name other_current
-  local -a primary_names=()
+  local -a primary_names=() competition_names=()
   read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
   : >"$output"
   while IFS=$'\t' read -r name desired minimum average source; do
     current="$(record_content "$current_records" "$name")"
@@ -771,6 +963,11 @@ choose_pending_primary_target() {
       [ "$other_name" = "$name" ] && continue
       other_current="$(record_content "$current_records" "$other_name")"
       [ -n "$other_current" ] || die "cannot determine current primary record content"
+      [ "$other_current" = "$desired" ] && continue 2
+    done
+    for other_name in "${competition_names[@]}"; do
+      other_current="$(record_content "$current_records" "$other_name")"
+      [ -n "$other_current" ] || die "cannot determine current competition record content"
       [ "$other_current" = "$desired" ] && continue 2
     done
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -811,6 +1008,7 @@ run_sync() {
   local export_file qualified_file current_records competition_targets primary_targets pending row_count canary_plan
   local target candidate previous_content candidate_min candidate_avg target_source target_kind=""
   local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response apply_enabled
+  local prepatch_records postpatch_records
 
   load_config
   for command in awk bash curl flock jq netstat pidof sha256sum ssh timeout; do need_cmd "$command"; done
@@ -860,11 +1058,22 @@ run_sync() {
   "$GATE_SCRIPT" primary-qualify >/dev/null
 
   build_primary_targets "$current_records" "$PRIMARY_QUALIFIED_FILE" "$QUALIFIED_FILE" "$primary_targets"
-  if [ "$PRIMARY_BASELINE_READY" -eq 1 ] && primary_records_have_duplicates "$current_records"; then
+  if [ "$PRIMARY_REPAIR_REQUIRED" -eq 1 ]; then
+    if [ "$PRIMARY_REPAIR_READY" -eq 1 ]; then
+      choose_pending_primary_target "$current_records" "$primary_targets" "$pending"
+      [ ! -s "$pending" ] || target_kind=primary
+    fi
+    if [ ! -s "$pending" ]; then
+      write_report awaiting_primary_repair_candidate "" "$PRIMARY_REPAIR_TARGET" "" \
+        "$PRIMARY_REPAIR_REASON"
+      log "degraded primary repair has priority; no safe single-record replacement is available"
+      return 0
+    fi
+  elif [ "$PRIMARY_BASELINE_READY" -eq 1 ] && primary_records_have_duplicates "$current_records"; then
     choose_pending_primary_target "$current_records" "$primary_targets" "$pending"
     [ ! -s "$pending" ] || target_kind=primary
   fi
-  if [ ! -s "$pending" ]; then
+  if [ ! -s "$pending" ] && [ "$PRIMARY_REPAIR_REQUIRED" -eq 0 ]; then
     build_competition_targets "$current_records" "$qualified_file" "$competition_targets"
     choose_pending_target "$current_records" "$competition_targets" "$pending"
     [ ! -s "$pending" ] || target_kind=competition
@@ -875,9 +1084,16 @@ run_sync() {
   fi
 
   if [ ! -s "$pending" ]; then
-    if [ "$PRIMARY_BASELINE_READY" -ne 1 ]; then
+    if [ "$PRIMARY_REPAIR_REQUIRED" -eq 1 ]; then
+      write_report awaiting_primary_repair_candidate "" "$PRIMARY_REPAIR_TARGET" "" \
+        "$PRIMARY_REPAIR_REASON"
+      log "degraded primary repair has priority; no safe single-record replacement is available"
+    elif [ "$PRIMARY_BASELINE_READY" -ne 1 ]; then
       write_report awaiting_primary_baseline "" "" "" primary_records_need_three_distinct_days_on_router_isolated_xray
       log "primary records have not completed the consecutive three-day same-path baseline"
+    elif [ "$COMPETITION_TARGETS_BLOCKED_BY_DEDUPE" -eq 1 ]; then
+      write_report awaiting_safe_competition_transition "" "" "" all_qualified_competition_candidates_are_already_exposed_in_the_five_slot_set
+      log "qualified competition candidates are already exposed in the five-slot set; no safe single-record update"
     elif [ "$row_count" -eq 0 ]; then
       write_report no_candidate "" "" "" sidecar_export_has_no_3.5_MBps_observation_candidate
       log "sidecar export has no observation candidate; primary and competition slots are already safe"
@@ -905,7 +1121,15 @@ run_sync() {
       || die "qualified challenger is below automatic sync threshold"
   fi
   if [ "$target_kind" = competition ]; then
-    assert_competition_update_safe "$current_records" "$target" "$candidate"
+    if ! assert_competition_update_safe "$current_records" "$target" "$candidate" "$target_source"; then
+      record_duplicate_guard_rejection "$candidate" "$target" "$previous_content" ""
+      return 0
+    fi
+  elif [ "$target_kind" = primary ]; then
+    if ! assert_competition_update_safe "$current_records" "$target" "$candidate" "$target_source"; then
+      record_duplicate_guard_rejection "$candidate" "$target" "$previous_content" ""
+      return 0
+    fi
   fi
   if [ "$target_kind" = primary ]; then
     decimal_at_least "$candidate_min" "$CFIP_AUTO_SYNC_PRIMARY_MIN_MBPS" \
@@ -931,6 +1155,13 @@ run_sync() {
   [ -n "$record_id" ] && [ "$record_id" != null ] || die "target record id is missing"
   [ "$(jq -r '.result[0].content' "$current_response")" = "$previous_content" ] \
     || die "target record changed concurrently"
+  prepatch_records="$TMP_DIR/prepatch-records.tsv"
+  collect_current_records "$prepatch_records"
+  assert_record_snapshot_unchanged "$current_records" "$prepatch_records"
+  if ! assert_competition_update_safe "$prepatch_records" "$target" "$candidate" "$target_source"; then
+    record_duplicate_guard_rejection "$candidate" "$target" "$previous_content" "_after_refresh"
+    return 0
+  fi
 
   ROLLBACK_RECORD_ID="$record_id"
   ROLLBACK_RECORD_NAME="$target"
@@ -938,10 +1169,10 @@ run_sync() {
   cf_patch_content "$record_id" "$candidate" "$TMP_DIR/update.json" \
     || die "Cloudflare record update failed"
   UPDATE_APPLIED=1
-  verify_response="$TMP_DIR/verify.json"
-  cf_get_record "$target" "$verify_response" || die "Cloudflare verification GET failed"
-  [ "$(jq -r '.result[0].content' "$verify_response")" = "$candidate" ] \
-    || die "Cloudflare verification content mismatch"
+  postpatch_records="$TMP_DIR/postpatch-records.tsv"
+  collect_current_records "$postpatch_records"
+  verify_record_transition "$prepatch_records" "$postpatch_records" \
+    "$target" "$candidate" "$target_source"
 
   [ "$(snapshot_xray_pids)" = "$baseline_pids" ] || die "PassWall Xray PID changed"
   [ "$(snapshot_xray_listeners)" = "$baseline_listeners" ] || die "PassWall Xray listeners changed"

@@ -22,6 +22,8 @@ PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE="${PASSWALL_CANDIDATE_VALIDATE_REPORT_FI
 PASSWALL_NODE_REPORT_FILE="${PASSWALL_NODE_REPORT_FILE:-$APP_DIR/passwall-node-benchmark.latest.tsv}"
 PASSWALL_NODE_HISTORY_FILE="${PASSWALL_NODE_HISTORY_FILE:-$APP_DIR/passwall-node-observation-history.tsv}"
 PASSWALL_NODE_TOPOLOGY_FILE="${PASSWALL_NODE_TOPOLOGY_FILE:-$APP_DIR/passwall-node-topology.latest.tsv}"
+PASSWALL_RUNTIME_JSON="${CFST_PASSWALL_RUNTIME_JSON:-/tmp/etc/passwall/acl/default/TCP_UDP_SOCKS.json}"
+PASSWALL_RUNTIME_JSON_FALLBACK="${CFST_PASSWALL_RUNTIME_JSON_FALLBACK:-/tmp/etc/passwall/acl/default/global.json}"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="${PASSWALL_STABLE_REPAIR_REPORT_FILE:-$APP_DIR/passwall-stable-repair.latest.tsv}"
 PASSWALL_STABLE_REPAIR_STATE_FILE="${PASSWALL_STABLE_REPAIR_STATE_FILE:-$APP_DIR/passwall-stable-repair.state.tsv}"
 OBSERVATION_HISTORY_FILE="${OBSERVATION_HISTORY_FILE:-$APP_DIR/observation-history.tsv}"
@@ -1039,6 +1041,22 @@ passwall_acl_rule_sources() {
   printf '%s\n' "$sources"
 }
 
+passwall_runtime_json_path() {
+  if [ -f "$PASSWALL_RUNTIME_JSON" ] && [ ! -L "$PASSWALL_RUNTIME_JSON" ]; then
+    printf '%s\n' "$PASSWALL_RUNTIME_JSON"
+  elif [ -f "$PASSWALL_RUNTIME_JSON_FALLBACK" ] && [ ! -L "$PASSWALL_RUNTIME_JSON_FALLBACK" ]; then
+    printf '%s\n' "$PASSWALL_RUNTIME_JSON_FALLBACK"
+  fi
+}
+
+passwall_runtime_address() {
+  local runtime
+  runtime="$(passwall_runtime_json_path)"
+  [ -n "$runtime" ] || return 0
+  jq -r '.outbounds[] | select(.protocol == "vmess" and (.settings.address | type == "string")) | .settings.address' \
+    "$runtime" 2>/dev/null | head -n 1
+}
+
 passwall_topology_status() {
   local global_section acl_section acl_enabled acl_sources
   global_section="$(passwall_current_tcp_node)"
@@ -1047,7 +1065,11 @@ passwall_topology_status() {
   acl_sources="$(passwall_acl_rule_sources 1)"
 
   if [ -z "$global_section" ]; then
-    echo "missing_global"
+    if [ -n "$(passwall_runtime_json_path)" ] && [ -n "$(passwall_runtime_address)" ]; then
+      echo "runtime_fallback"
+    else
+      echo "missing_global"
+    fi
   elif [ -z "$acl_section" ]; then
     echo "missing_acl1"
   elif [ "$acl_section" = "$global_section" ]; then
@@ -1068,16 +1090,17 @@ passwall_print_node_topology() {
     return 0
   fi
 
-  local global_section acl_section status
+  local global_section acl_section status runtime_address
   global_section="$(passwall_current_tcp_node)"
   acl_section="$(passwall_current_acl_node)"
   status="$(passwall_topology_status)"
+  runtime_address="$(passwall_runtime_address)"
 
   printf 'role\tsection\tremarks\taddress\tenabled\tsources\tstatus\n'
   printf 'global\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "${global_section:-unknown}" \
+    "${global_section:-runtime}" \
     "$(passwall_node_field "$global_section" remarks)" \
-    "$(passwall_node_field "$global_section" address)" \
+    "${runtime_address:-$(passwall_node_field "$global_section" address)}" \
     "1" \
     "all" \
     "$status"

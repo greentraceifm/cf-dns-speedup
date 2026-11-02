@@ -56,6 +56,8 @@ STABLE_POOL_REPLENISH_REPORT_FILE="$TMP_DIR/stable-pool-replenish.latest.tsv"
 PASSWALL_CANDIDATE_VALIDATE_REPORT_FILE="$TMP_DIR/passwall-candidate-validate.latest.tsv"
 PASSWALL_NODE_HISTORY_FILE="$TMP_DIR/passwall-node-observation-history.tsv"
 PASSWALL_NODE_TOPOLOGY_FILE="$TMP_DIR/passwall-node-topology.tsv"
+PASSWALL_RUNTIME_JSON="$TMP_DIR/runtime-missing.json"
+PASSWALL_RUNTIME_JSON_FALLBACK="$TMP_DIR/etc/passwall/acl/default/global.json"
 PASSWALL_STABLE_REPAIR_REPORT_FILE="$TMP_DIR/passwall-stable-repair.latest.tsv"
 PASSWALL_STABLE_REPAIR_STATE_FILE="$TMP_DIR/passwall-stable-repair.state.tsv"
 CHAMPION_POOL_FILE="$TMP_DIR/champion-pool.tsv"
@@ -655,6 +657,25 @@ awk -F '\t' '$1 == "global" && $2 == "slowNode" && $7 == "scoped_override" {foun
 awk -F '\t' '$1 == "acl1" && $2 == "fastNode" && $6 == "192.168.1.110" && $7 == "scoped_override" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_TOPOLOGY_FILE" \
   || fail "passwall node topology should report ACL source binding"
 pass "passwall node topology distinguishes scoped ACL override from global drift"
+mkdir -p "$(dirname "$PASSWALL_RUNTIME_JSON_FALLBACK")"
+printf '{"outbounds":[{"protocol":"vmess","tag":"proxy","settings":{"address":"104.17.10.9"}}]}\n' \
+  >"$PASSWALL_RUNTIME_JSON_FALLBACK"
+mkdir -p "$TMP_DIR/runtime-bin"
+cat >"$TMP_DIR/runtime-bin/jq" <<'EOF'
+#!/usr/bin/env sh
+case "$1" in
+  -r) printf '104.17.10.9\n' ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$TMP_DIR/runtime-bin/jq"
+PATH="$TMP_DIR/runtime-bin:$PATH"
+current_passwall_node=""
+current_acl_node=""
+passwall_node_topology_command > "$TMP_DIR/passwall-runtime-fallback.out"
+awk -F '\t' '$1 == "global" && $2 == "runtime" && $4 == "104.17.10.9" && $7 == "runtime_fallback" {found=1} END {exit found ? 0 : 1}' "$PASSWALL_NODE_TOPOLOGY_FILE" \
+  || fail "passwall topology did not fall back to the active runtime JSON"
+pass "passwall node topology reports runtime JSON fallback"
 current_passwall_node="slowNode"
 current_acl_node="slowNode"
 passwall_restart_for_node_benchmark() { :; }
