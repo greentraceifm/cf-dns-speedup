@@ -39,6 +39,11 @@ UPDATE_APPLIED=0
 ROLLBACK_RECORD_ID=""
 ROLLBACK_RECORD_NAME=""
 ROLLBACK_CONTENT=""
+APPLIED_CONTENT=""
+ROLLBACK_SNAPSHOT_FILE=""
+SYNC_TASK_ID=""
+SYNC_FAILURE_STAGE="startup"
+SYNC_EVENT_REPORTING=0
 CF_API_TOKEN=""
 CF_ZONE_ID=""
 
@@ -102,10 +107,36 @@ cf_patch_content() {
 
 cleanup() {
   local rc=$?
-  if [ "$rc" -ne 0 ] && [ "$UPDATE_APPLIED" -eq 1 ] && [ -n "$ROLLBACK_RECORD_ID" ]; then
-    log "failure after Cloudflare update; restoring $ROLLBACK_RECORD_NAME"
-    cf_patch_content "$ROLLBACK_RECORD_ID" "$ROLLBACK_CONTENT" "$TMP_DIR/rollback.json" \
-      || log "ERROR: Cloudflare rollback failed for $ROLLBACK_RECORD_NAME"
+  local rollback_status=not_required rollback_check=""
+  trap - EXIT INT TERM
+  if [ "$rc" -ne 0 ] && [ "$SYNC_EVENT_REPORTING" -eq 1 ]; then
+    if [ "$UPDATE_APPLIED" -eq 1 ] && [ -n "$ROLLBACK_RECORD_ID" ] && [ -n "$TMP_DIR" ]; then
+      rollback_status=rollback_failed
+      log "failure after Cloudflare update; restoring $ROLLBACK_RECORD_NAME"
+      if cf_patch_content "$ROLLBACK_RECORD_ID" "$ROLLBACK_CONTENT" "$TMP_DIR/rollback.json"; then
+        rollback_check="$TMP_DIR/rollback-records.tsv"
+        if collect_current_records_safe "$rollback_check" \
+          && [ -n "$ROLLBACK_SNAPSHOT_FILE" ] \
+          && rollback_snapshot_matches "$ROLLBACK_SNAPSHOT_FILE" "$rollback_check"; then
+          rollback_status=verified
+          UPDATE_APPLIED=0
+          log "Cloudflare rollback verified against the pre-update five-slot snapshot"
+        else
+          log "ERROR: Cloudflare rollback verification failed for $ROLLBACK_RECORD_NAME"
+        fi
+      else
+        log "ERROR: Cloudflare rollback request failed for $ROLLBACK_RECORD_NAME"
+      fi
+    fi
+    if [ "$rollback_status" = verified ]; then
+      append_history_event failed_rolled_back "$APPLIED_CONTENT" "$ROLLBACK_RECORD_NAME" "$ROLLBACK_CONTENT" \
+        "stage=$SYNC_FAILURE_STAGE;rollback=verified_five_slot_snapshot"
+    elif [ "$rollback_status" = rollback_failed ]; then
+      append_history_event rollback_failed "$APPLIED_CONTENT" "$ROLLBACK_RECORD_NAME" "$ROLLBACK_CONTENT" \
+        "stage=$SYNC_FAILURE_STAGE;rollback=not_verified"
+    else
+      append_history_event failed "" "" "" "stage=$SYNC_FAILURE_STAGE;rollback=not_required"
+    fi
   fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
   exit "$rc"
@@ -180,6 +211,9 @@ write_report() {
   local status="$1" candidate="${2:-}" record="${3:-}" previous="${4:-}" detail="${5:-}"
   local temporary="$REPORT_FILE.tmp.$$" now
   now="$(date '+%F %T')"
+  if [ -n "$SYNC_TASK_ID" ]; then
+    detail="${detail:+$detail;}task_id=$SYNC_TASK_ID"
+  fi
   printf 'observed_at\tstatus\tcandidate_ip\trecord_name\tprevious_ip\tdetail\n' >"$temporary"
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$status" "$candidate" "$record" "$previous" "$detail" >>"$temporary"
   chmod 600 "$temporary"
@@ -189,6 +223,19 @@ write_report() {
     chmod 600 "$HISTORY_FILE"
   fi
   tail -n 1 "$REPORT_FILE" >>"$HISTORY_FILE"
+}
+
+append_history_event() {
+  local status="$1" candidate="${2:-}" record="${3:-}" previous="${4:-}" detail="${5:-}" now
+  now="$(date '+%F %T')"
+  if [ -n "$SYNC_TASK_ID" ]; then
+    detail="${detail:+$detail;}task_id=$SYNC_TASK_ID"
+  fi
+  if [ ! -f "$HISTORY_FILE" ]; then
+    printf 'observed_at\tstatus\tcandidate_ip\trecord_name\tprevious_ip\tdetail\n' >"$HISTORY_FILE"
+    chmod 600 "$HISTORY_FILE"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$status" "$candidate" "$record" "$previous" "$detail" >>"$HISTORY_FILE"
 }
 
 record_duplicate_guard_rejection() {
@@ -464,6 +511,89 @@ primary_records_have_duplicates() {
     esac
   done
   return 1
+}
+
+GLOBAL_DEDUPE_REQUIRED=0
+GLOBAL_DEDUPE_READY=0
+GLOBAL_DEDUPE_TARGET=""
+GLOBAL_DEDUPE_REASON=""
+
+choose_pending_global_dedupe_target() {
+  local current_records="$1" qualified="$2" output="$3"
+  local configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}"
+  local -a record_names=() primary_names=() competition_names=()
+  local name ip current_ip seen="" duplicate_target="" duplicate_ip=""
+  local candidate days minimum average safe
+
+  GLOBAL_DEDUPE_REQUIRED=0
+  GLOBAL_DEDUPE_READY=0
+  GLOBAL_DEDUPE_TARGET=""
+  GLOBAL_DEDUPE_REASON=""
+  : >"$output"
+
+  read -r -a record_names <<<"$(printf '%s' "$configured" | tr ', ' '\n\n' | sed '/^$/d' | tr '\n' ' ')"
+  read -r -a primary_names <<<"$CFIP_AUTO_SYNC_PRIMARY_RECORDS"
+  read -r -a competition_names <<<"$CFIP_AUTO_SYNC_RECORDS"
+  [ "${#record_names[@]}" -eq 5 ] || die "global duplicate planner requires exactly five configured slots"
+  [ "${#primary_names[@]}" -eq 3 ] || die "exactly three primary records are required"
+  [ "${#competition_names[@]}" -eq 2 ] || die "exactly two competition records are required"
+
+  # Preserve the earliest configured occurrence and repair only the later
+  # duplicate. A one-record transition cannot safely replace an earlier slot
+  # while its value is still exposed elsewhere.
+  for name in "${record_names[@]}"; do
+    current_ip="$(record_content "$current_records" "$name")"
+    [ -n "$current_ip" ] || die "cannot determine all five slot contents"
+    case " $seen " in
+      *" $current_ip "*)
+        if [ -z "$duplicate_target" ]; then
+          duplicate_target="$name"
+          duplicate_ip="$current_ip"
+        fi
+        ;;
+      *) seen="$seen $current_ip" ;;
+    esac
+  done
+  [ -n "$duplicate_target" ] || return 0
+
+  for name in "${primary_names[@]}"; do
+    if [ "$name" = "$duplicate_target" ]; then
+      # Primary duplicate repair remains owned by build_primary_targets.
+      GLOBAL_DEDUPE_REASON="primary_duplicate_requires_primary_planner"
+      return 0
+    fi
+  done
+  for name in "${competition_names[@]}"; do
+    [ "$name" = "$duplicate_target" ] && break
+  done
+  [ "$name" = "$duplicate_target" ] || {
+    GLOBAL_DEDUPE_REASON="duplicate_target_is_outside_primary_or_competition_slots"
+    return 0
+  }
+
+  GLOBAL_DEDUPE_REQUIRED=1
+  GLOBAL_DEDUPE_TARGET="$duplicate_target"
+  GLOBAL_DEDUPE_REASON="duplicate_competition_slot_has_no_safe_qualified_replacement"
+
+  # qualified is the current-cycle competition qualification output. It is
+  # already ranked by the existing quality order; skip candidates exposed in
+  # any of the other four slots and take the first safe one.
+  while IFS=$'\t' read -r candidate days minimum average; do
+    [ -n "$candidate" ] || continue
+    safe=1
+    for name in "${record_names[@]}"; do
+      [ "$name" = "$duplicate_target" ] && continue
+      current_ip="$(record_content "$current_records" "$name")"
+      [ "$current_ip" != "$candidate" ] || { safe=0; break; }
+    done
+    [ "$safe" -eq 1 ] || continue
+    decimal_at_least "$minimum" "$CFIP_AUTO_SYNC_MIN_MBPS" || continue
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$duplicate_target" "$candidate" \
+      "$duplicate_ip" "$minimum" "$average" global_dedupe >"$output"
+    GLOBAL_DEDUPE_READY=1
+    GLOBAL_DEDUPE_REASON="safe_qualified_replacement_available"
+    return 0
+  done < <(rank_candidate_rows 1000 <"$qualified")
 }
 
 build_competition_targets() {
@@ -1004,12 +1134,37 @@ collect_current_records() {
   done
 }
 
+collect_current_records_safe() {
+  local output="$1" configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}" record response content
+  : >"$output"
+  for record in $(printf '%s\n' "$configured" | tr ', ' '\n\n' | sed '/^$/d'); do
+    response="$TMP_DIR/rollback-record-$(printf '%s' "$record" | sha256sum | awk '{print $1}').json"
+    cf_get_record "$record" "$response" || return 1
+    content="$(jq -r '.result[0].content // empty' "$response")"
+    [ -n "$content" ] || return 1
+    printf '%s\t%s\n' "$record" "$content" >>"$output"
+  done
+}
+
+rollback_snapshot_matches() {
+  local expected="$1" actual="$2" name expected_ip actual_ip
+  local configured="${CF_RECORD_NAMES:-${CF_RECORD_NAME:-}}"
+  for name in $(printf '%s\n' "$configured" | tr ', ' '\n\n' | sed '/^$/d'); do
+    expected_ip="$(record_content "$expected" "$name")"
+    actual_ip="$(record_content "$actual" "$name")"
+    [ -n "$expected_ip" ] && [ "$expected_ip" = "$actual_ip" ] || return 1
+  done
+}
+
 run_sync() {
   local export_file qualified_file current_records competition_targets primary_targets pending row_count canary_plan
   local target candidate previous_content candidate_min candidate_avg target_source target_kind=""
   local current_response record_id baseline_pids baseline_listeners baseline_passwall verify_response apply_enabled
   local prepatch_records postpatch_records
 
+  SYNC_TASK_ID="$(date '+%Y%m%dT%H%M%S')-$$"
+  SYNC_EVENT_REPORTING=1
+  SYNC_FAILURE_STAGE=config
   load_config
   for command in awk bash curl flock jq netstat pidof sha256sum ssh timeout; do need_cmd "$command"; done
   [ -x "$GATE_SCRIPT" ] || die "router candidate gate is not executable"
@@ -1017,6 +1172,7 @@ run_sync() {
   mkdir -p "$APP_DIR"
   exec 9>"$LOCK_FILE"
   flock -n 9 || die "another sidecar auto sync is running"
+  SYNC_FAILURE_STAGE=preflight
   if main_project_lock_busy; then
     die "main CFIP project lock is busy"
   fi
@@ -1029,8 +1185,10 @@ run_sync() {
   baseline_passwall="$(sha256sum /etc/config/passwall | awk '{print $1}')"
   [ -n "$baseline_pids" ] || die "no active PassWall Xray process"
   [ -n "$baseline_listeners" ] || die "no active PassWall Xray listener"
+  SYNC_FAILURE_STAGE=http_gate_before
   http_gate || die "HTTP gate failed before sidecar sync"
 
+  SYNC_FAILURE_STAGE=prepare
   TMP_DIR="$(mktemp -d /tmp/cfip-sidecar-auto-sync.XXXXXX)"
   chmod 700 "$TMP_DIR"
   export_file="$TMP_DIR/candidates.tsv"
@@ -1041,6 +1199,7 @@ run_sync() {
   pending="$TMP_DIR/pending-target.tsv"
   canary_plan="$TMP_DIR/canary-plan.tsv"
 
+  SYNC_FAILURE_STAGE=export
   pull_export "$export_file"
   CFIP_IMPORT_MAX_AGE_SECONDS="$CFIP_AUTO_SYNC_EXPORT_MAX_AGE_SECONDS" \
     "$GATE_SCRIPT" import "$export_file"
@@ -1054,6 +1213,7 @@ run_sync() {
     refresh_watchlist "$canary_plan"
     choose_qualified_candidates "$qualified_file" "$canary_plan"
   fi
+  SYNC_FAILURE_STAGE=qualification
   run_primary_canaries "$current_records"
   "$GATE_SCRIPT" primary-qualify >/dev/null
 
@@ -1072,6 +1232,21 @@ run_sync() {
   elif [ "$PRIMARY_BASELINE_READY" -eq 1 ] && primary_records_have_duplicates "$current_records"; then
     choose_pending_primary_target "$current_records" "$primary_targets" "$pending"
     [ ! -s "$pending" ] || target_kind=primary
+  fi
+  if [ ! -s "$pending" ] && [ "$PRIMARY_REPAIR_REQUIRED" -eq 0 ]; then
+    if ! primary_records_have_duplicates "$current_records"; then
+      choose_pending_global_dedupe_target "$current_records" "$qualified_file" "$pending"
+      if [ "$GLOBAL_DEDUPE_REQUIRED" -eq 1 ]; then
+        if [ -s "$pending" ]; then
+          target_kind=competition
+        else
+          write_report awaiting_safe_competition_transition "" "$GLOBAL_DEDUPE_TARGET" "" \
+            "global_dedupe:$GLOBAL_DEDUPE_REASON"
+          log "existing five-slot duplicate has no safe current-cycle replacement; no Cloudflare write"
+          return 0
+        fi
+      fi
+    fi
   fi
   if [ ! -s "$pending" ] && [ "$PRIMARY_REPAIR_REQUIRED" -eq 0 ]; then
     build_competition_targets "$current_records" "$qualified_file" "$competition_targets"
@@ -1149,6 +1324,7 @@ run_sync() {
     return 0
   fi
 
+  SYNC_FAILURE_STAGE=cloudflare_preupdate
   current_response="$TMP_DIR/target-current.json"
   cf_get_record "$target" "$current_response" || die "cannot refresh target record before update"
   record_id="$(jq -r '.result[0].id' "$current_response")"
@@ -1158,6 +1334,7 @@ run_sync() {
   prepatch_records="$TMP_DIR/prepatch-records.tsv"
   collect_current_records "$prepatch_records"
   assert_record_snapshot_unchanged "$current_records" "$prepatch_records"
+  ROLLBACK_SNAPSHOT_FILE="$prepatch_records"
   if ! assert_competition_update_safe "$prepatch_records" "$target" "$candidate" "$target_source"; then
     record_duplicate_guard_rejection "$candidate" "$target" "$previous_content" "_after_refresh"
     return 0
@@ -1166,9 +1343,12 @@ run_sync() {
   ROLLBACK_RECORD_ID="$record_id"
   ROLLBACK_RECORD_NAME="$target"
   ROLLBACK_CONTENT="$previous_content"
+  APPLIED_CONTENT="$candidate"
+  UPDATE_APPLIED=1
+  SYNC_FAILURE_STAGE=cloudflare_patch
   cf_patch_content "$record_id" "$candidate" "$TMP_DIR/update.json" \
     || die "Cloudflare record update failed"
-  UPDATE_APPLIED=1
+  SYNC_FAILURE_STAGE=postpatch_record_verification
   postpatch_records="$TMP_DIR/postpatch-records.tsv"
   collect_current_records "$postpatch_records"
   verify_record_transition "$prepatch_records" "$postpatch_records" \
@@ -1178,8 +1358,10 @@ run_sync() {
   [ "$(snapshot_xray_listeners)" = "$baseline_listeners" ] || die "PassWall Xray listeners changed"
   [ "$(sha256sum /etc/config/passwall | awk '{print $1}')" = "$baseline_passwall" ] \
     || die "PassWall configuration changed"
+  SYNC_FAILURE_STAGE=http_gate_after
   http_gate || die "HTTP gate failed after Cloudflare update"
 
+  SYNC_FAILURE_STAGE=success_finalize
   printf 'last_record=%s\nlast_candidate=%s\nlast_source=%s\nupdated_at=%s\n' \
     "$target" "$candidate" "$target_source" "$(date '+%F %T')" >"$STATE_FILE.tmp.$$"
   chmod 600 "$STATE_FILE.tmp.$$"
@@ -1192,6 +1374,7 @@ run_sync() {
       "source=${target_source}_min=${candidate_min:-n/a}_avg=${candidate_avg:-n/a}"
   fi
   UPDATE_APPLIED=0
+  SYNC_EVENT_REPORTING=0
   log "Cloudflare $target_kind slot sync complete: record=$target; PassWall was not stopped or restarted"
 }
 status_command() {

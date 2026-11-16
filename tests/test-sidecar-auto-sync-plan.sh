@@ -94,6 +94,35 @@ if ! (assert_competition_update_safe "$GLOBAL_DUP_CURRENT" auto4.example.test 10
   echo "stable mirror exception was rejected" >&2; exit 1
 fi
 
+GLOBAL_DEDUPE_QUALIFIED="$TEST_TMP/global-dedupe-qualified.tsv"
+printf '104.26.15.28\t7\t4.20\t4.38\n104.26.9.9\t6\t4.10\t4.24\n' >"$GLOBAL_DEDUPE_QUALIFIED"
+GLOBAL_DEDUPE_PENDING="$TEST_TMP/global-dedupe-pending.tsv"
+GLOBAL_CROSS_POOL_DUP="$TEST_TMP/global-cross-pool-duplicate.tsv"
+printf 'auto.example.test\t104.26.1.38\nauto1.example.test\t104.17.130.81\nauto2.example.test\t104.17.129.81\nauto3.example.test\t104.26.15.28\nauto4.example.test\t104.26.1.38\n' >"$GLOBAL_CROSS_POOL_DUP"
+choose_pending_global_dedupe_target "$GLOBAL_CROSS_POOL_DUP" "$GLOBAL_DEDUPE_QUALIFIED" \
+  "$GLOBAL_DEDUPE_PENDING"
+[ "$GLOBAL_DEDUPE_REQUIRED" -eq 1 ] && [ "$GLOBAL_DEDUPE_READY" -eq 1 ] \
+  || { echo "existing cross-pool duplicate did not produce a safe repair plan" >&2; exit 1; }
+awk -F '\t' 'NR==1 && $1=="auto4.example.test" && $2=="104.26.9.9" && $3=="104.26.1.38" && $6=="global_dedupe"{ok=1} END{exit ok?0:1}' \
+  "$GLOBAL_DEDUPE_PENDING" \
+  || { echo "global dedupe planner did not choose the first unoccupied qualified candidate" >&2; exit 1; }
+
+GLOBAL_DEDUPE_NO_SAFE="$TEST_TMP/global-dedupe-no-safe.tsv"
+printf '104.26.1.38\t7\t4.20\t4.38\n104.26.15.28\t6\t4.10\t4.24\n' >"$GLOBAL_DEDUPE_NO_SAFE"
+choose_pending_global_dedupe_target "$GLOBAL_CROSS_POOL_DUP" "$GLOBAL_DEDUPE_NO_SAFE" \
+  "$GLOBAL_DEDUPE_PENDING"
+[ "$GLOBAL_DEDUPE_REQUIRED" -eq 1 ] && [ "$GLOBAL_DEDUPE_READY" -eq 0 ] \
+  && [ ! -s "$GLOBAL_DEDUPE_PENDING" ] \
+  && [ "$GLOBAL_DEDUPE_REASON" = duplicate_competition_slot_has_no_safe_qualified_replacement ] \
+  || { echo "global dedupe planner did not fail closed without a safe candidate" >&2; exit 1; }
+
+GLOBAL_DEDUPE_PRIMARY="$TEST_TMP/global-dedupe-primary.tsv"
+printf 'auto.example.test\t104.26.1.38\nauto1.example.test\t104.26.1.38\nauto2.example.test\t104.17.129.81\nauto3.example.test\t104.26.15.28\nauto4.example.test\t104.26.9.9\n' >"$GLOBAL_DEDUPE_PRIMARY"
+choose_pending_global_dedupe_target "$GLOBAL_DEDUPE_PRIMARY" "$GLOBAL_DEDUPE_QUALIFIED" \
+  "$GLOBAL_DEDUPE_PENDING"
+[ "$GLOBAL_DEDUPE_REQUIRED" -eq 0 ] && [ ! -s "$GLOBAL_DEDUPE_PENDING" ] \
+  || { echo "global dedupe planner took ownership of a primary duplicate" >&2; exit 1; }
+
 UNCHANGED_GLOBAL="$TEST_TMP/global-unchanged.tsv"
 cp "$GLOBAL_DUP_CURRENT" "$UNCHANGED_GLOBAL"
 assert_record_snapshot_unchanged "$GLOBAL_DUP_CURRENT" "$UNCHANGED_GLOBAL"
@@ -123,6 +152,31 @@ awk -F '\t' 'NR==2 && $2=="awaiting_safe_competition_transition" && $4=="auto4.e
   || { echo "duplicate guard rejection did not refresh latest report with reason" >&2; exit 1; }
 [ "$(awk 'END {print NR}' "$HISTORY_FILE")" -eq 2 ] \
   || { echo "duplicate guard rejection was not appended to report history" >&2; exit 1; }
+
+SYNC_TASK_ID=20261110T043600-1234
+HISTORY_BEFORE="$(wc -l <"$HISTORY_FILE")"
+write_report updated 104.17.131.246 auto3.example.test 104.26.7.141 source=challenger
+REPORT_SUCCESS="$(tail -n 1 "$REPORT_FILE")"
+append_history_event failed_rolled_back 104.17.159.22 auto3.example.test 104.26.7.141 \
+  'stage=http_gate_after;rollback=verified_five_slot_snapshot'
+[ "$(wc -l <"$HISTORY_FILE")" -eq "$((HISTORY_BEFORE + 2))" ] \
+  || { echo "failure audit event did not append to history" >&2; exit 1; }
+[ "$(tail -n 1 "$REPORT_FILE")" = "$REPORT_SUCCESS" ] \
+  || { echo "failure audit append unexpectedly replaced latest report" >&2; exit 1; }
+awk -F '\t' 'END {exit ($2=="failed_rolled_back" && $3=="104.17.159.22" && $4=="auto3.example.test" && $5=="104.26.7.141" && $6 ~ /task_id=20261110T043600-1234/ && $6 ~ /rollback=verified_five_slot_snapshot/) ? 0 : 1}' "$HISTORY_FILE" \
+  || { echo "failure audit event fields or task ID are incomplete" >&2; exit 1; }
+SNAPSHOT_EXPECTED="$TEST_TMP/rollback-expected.tsv"
+SNAPSHOT_ACTUAL="$TEST_TMP/rollback-actual.tsv"
+printf 'a.example.test\t192.0.2.1\nb.example.test\t192.0.2.2\n' >"$SNAPSHOT_EXPECTED"
+cp "$SNAPSHOT_EXPECTED" "$SNAPSHOT_ACTUAL"
+CF_RECORD_NAMES="a.example.test b.example.test"
+rollback_snapshot_matches "$SNAPSHOT_EXPECTED" "$SNAPSHOT_ACTUAL" \
+  || { echo "matching rollback snapshot was rejected" >&2; exit 1; }
+printf 'a.example.test\t192.0.2.1\nb.example.test\t192.0.2.3\n' >"$SNAPSHOT_ACTUAL"
+if rollback_snapshot_matches "$SNAPSHOT_EXPECTED" "$SNAPSHOT_ACTUAL"; then
+  echo "mismatched rollback snapshot was accepted" >&2; exit 1
+fi
+CF_RECORD_NAMES="auto.example.test auto1.example.test auto2.example.test auto3.example.test auto4.example.test"
 
 PRIMARY_QUALIFIED="$TEST_TMP/primary-qualified.tsv"
 PRIMARY_CANARY_HISTORY_FILE="$TEST_TMP/primary-canary-history.tsv"
