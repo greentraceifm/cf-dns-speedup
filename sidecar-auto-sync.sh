@@ -46,6 +46,8 @@ SYNC_FAILURE_STAGE="startup"
 SYNC_EVENT_REPORTING=0
 CF_API_TOKEN=""
 CF_ZONE_ID=""
+HTTP_GATE_GOOGLE="unknown"
+HTTP_GATE_YOUTUBE="unknown"
 
 log() { printf '%s %s\n' "$(date '+%F %T')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -130,12 +132,13 @@ cleanup() {
     fi
     if [ "$rollback_status" = verified ]; then
       append_history_event failed_rolled_back "$APPLIED_CONTENT" "$ROLLBACK_RECORD_NAME" "$ROLLBACK_CONTENT" \
-        "stage=$SYNC_FAILURE_STAGE;rollback=verified_five_slot_snapshot"
+        "stage=$SYNC_FAILURE_STAGE;http_google=$HTTP_GATE_GOOGLE;http_youtube=$HTTP_GATE_YOUTUBE;rollback=verified_five_slot_snapshot"
     elif [ "$rollback_status" = rollback_failed ]; then
       append_history_event rollback_failed "$APPLIED_CONTENT" "$ROLLBACK_RECORD_NAME" "$ROLLBACK_CONTENT" \
-        "stage=$SYNC_FAILURE_STAGE;rollback=not_verified"
+        "stage=$SYNC_FAILURE_STAGE;http_google=$HTTP_GATE_GOOGLE;http_youtube=$HTTP_GATE_YOUTUBE;rollback=not_verified"
     else
-      append_history_event failed "" "" "" "stage=$SYNC_FAILURE_STAGE;rollback=not_required"
+      append_history_event failed "" "" "" \
+        "stage=$SYNC_FAILURE_STAGE;http_google=$HTTP_GATE_GOOGLE;http_youtube=$HTTP_GATE_YOUTUBE;rollback=not_required"
     fi
   fi
   [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"
@@ -203,8 +206,23 @@ snapshot_xray_listeners() {
 }
 
 http_gate() {
-  [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 https://www.google.com/generate_204)" = 204 ]
-  [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 https://www.youtube.com/generate_204)" = 204 ]
+  local attempt=1
+  while [ "$attempt" -le 3 ]; do
+    HTTP_GATE_GOOGLE="$(curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 8 --max-time 15 https://www.google.com/generate_204)" \
+      || HTTP_GATE_GOOGLE=000
+    HTTP_GATE_YOUTUBE="$(curl -sS -o /dev/null -w '%{http_code}' \
+      --connect-timeout 8 --max-time 15 https://www.youtube.com/generate_204)" \
+      || HTTP_GATE_YOUTUBE=000
+    if [ "$HTTP_GATE_GOOGLE" = 204 ] && [ "$HTTP_GATE_YOUTUBE" = 204 ]; then
+      [ "$attempt" -eq 1 ] || log "HTTP gate recovered on attempt $attempt"
+      return 0
+    fi
+    log "HTTP gate attempt $attempt failed: google=$HTTP_GATE_GOOGLE youtube=$HTTP_GATE_YOUTUBE"
+    [ "$attempt" -lt 3 ] || return 1
+    sleep 2
+    attempt=$((attempt + 1))
+  done
 }
 
 write_report() {

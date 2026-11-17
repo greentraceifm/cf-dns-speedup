@@ -443,4 +443,24 @@ fi
 [ ! -e "$CF_REQUEST_TEST_JQ_MARKER" ] \
   || { echo "jq ran after a failed Cloudflare request" >&2; exit 1; }
 
+HTTP_GATE_TEST_COUNTER="$TEST_TMP/http-gate-attempts"
+: >"$HTTP_GATE_TEST_COUNTER"
+curl() {
+  local attempts url="$*"
+  printf 'x\n' >>"$HTTP_GATE_TEST_COUNTER"
+  attempts="$(wc -l <"$HTTP_GATE_TEST_COUNTER")"
+  if [ "$attempts" -le 2 ]; then
+    return 28
+  fi
+  printf '204'
+}
+http_gate \
+  || { echo "HTTP gate did not recover from a transient failure" >&2; exit 1; }
+[ "$(wc -l <"$HTTP_GATE_TEST_COUNTER")" -eq 4 ] \
+  || { echo "HTTP gate retry count is wrong" >&2; exit 1; }
+
 echo "sidecar auto sync plan test passed"
+grep -Fq 'HTTP_GATE_GOOGLE' "$ROOT/sidecar-auto-sync.sh"
+grep -Fq 'HTTP_GATE_YOUTUBE' "$ROOT/sidecar-auto-sync.sh"
+grep -Fq 'http_google=' "$ROOT/sidecar-auto-sync.sh"
+grep -Fq 'http_youtube=' "$ROOT/sidecar-auto-sync.sh"

@@ -20,7 +20,7 @@ $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source
 $scp = (Get-Command scp.exe -ErrorAction Stop).Source
 $openClaw = 'ubuntu@192.168.1.140'
 $vm36Tool = '/home/ubuntu/.openclaw/tools/cfip-vm36-ssh.sh'
-$expectedOldScript = '6e1d4dc429f4c84135503325e94fdb2549f5a5359c1e541f3fc8633e2fa2a963'
+$expectedOldScript = 'bd78f64238749b987d6f892c1b45745f65e0e18c88384ced45c7be8c60b45fda'
 $expectedSpeedup = '3fcdec7a6eb1c0da699b42fc8efce2abde61500c449b072c87431504c0c4b76b'
 $expectedGate = 'f0a9153f574e0c807cf3873eb00d07eb0b8c482b75264e2450aec9f9b12e90ec'
 
@@ -103,15 +103,28 @@ snapshot_pids() { pidof xray 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -n; 
 snapshot_listeners() { netstat -lntp 2>/dev/null | awk 'NR > 2 && /xray/ {print $4 "|" $7}' | sort; }
 snapshot_dns() {
   for name in auto.greentraceifm.top auto1.greentraceifm.top auto2.greentraceifm.top auto3.greentraceifm.top auto4.greentraceifm.top; do
-    for server in 127.0.0.1 192.168.1.1 1.1.1.1; do
+    # Public resolvers may legitimately change cache state during a deployment.
+    # Use the production-local resolver views for the before/after mutation gate;
+    # public DNS is checked separately in the post-deployment read-only audit.
+    for server in 127.0.0.1 192.168.1.1; do
       answer=$(nslookup "$name" "$server" 2>&1 | awk '/^Address [0-9]*: / {a=$3} /^Address: / {a=$2} END {if (a != "") print a; else print "NO_ANSWER"}')
       printf '%s\t%s\t%s\n' "$name" "$server" "$answer"
     done
   done
 }
 http_gate() {
-  test "$(curl -4 -L -sS -o /dev/null --connect-timeout 8 --max-time 15 -w '%{http_code}' https://www.google.com/generate_204)" = 204
-  test "$(curl -4 -L -sS -o /dev/null --connect-timeout 8 --max-time 15 -w '%{http_code}' https://www.youtube.com/generate_204)" = 204
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    google="$(curl -4 -L -sS -o /dev/null --connect-timeout 8 --max-time 15 -w '%{http_code}' https://www.google.com/generate_204 || true)"
+    youtube="$(curl -4 -L -sS -o /dev/null --connect-timeout 8 --max-time 15 -w '%{http_code}' https://www.youtube.com/generate_204 || true)"
+    if [ "$google" = 204 ] && [ "$youtube" = 204 ]; then
+      return 0
+    fi
+    echo "CFIP_HTTP_GATE_ATTEMPT=$attempt GOOGLE=$google YOUTUBE=$youtube" >&2
+    [ "$attempt" -lt 3 ] || return 1
+    sleep 2
+    attempt=$((attempt + 1))
+  done
 }
 
 exec 7>/tmp/cf-dns-speedup.lock
