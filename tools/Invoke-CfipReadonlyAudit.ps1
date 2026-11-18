@@ -98,7 +98,24 @@ done
 for name in auto.greentraceifm.top auto1.greentraceifm.top auto2.greentraceifm.top auto3.greentraceifm.top auto4.greentraceifm.top; do
     printf 'DNS %s' "$name"
     for server in 127.0.0.1 192.168.1.1 1.1.1.1; do
-        answer=$(nslookup "$name" "$server" 2>&1 | awk '/^Address [0-9]*: / {a=$3} /^Address: / {a=$2} END {if (a != "") print a; else print "NO_ANSWER"}')
+        answer=NO_ANSWER
+        attempt=1
+        while [ "$attempt" -le 3 ]; do
+            candidate=$(nslookup "$name" "$server" 2>&1 | awk '
+                /^Name:[[:space:]]/ {seen_name=1; next}
+                seen_name && /^Address([[:space:]][0-9]+)?:[[:space:]]/ {
+                    sub(/^Address([[:space:]][0-9]+)?:[[:space:]]*/, "", $0)
+                    print
+                    exit
+                }
+            ')
+            if [ -n "$candidate" ]; then
+                answer=$candidate
+                break
+            fi
+            sleep 1
+            attempt=$((attempt + 1))
+        done
         printf ' | %s=%s' "$server" "$answer"
     done
     printf '\n'
